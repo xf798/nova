@@ -16,9 +16,9 @@ function RecallBlock({ recall }: { recall: RecallInfo }) {
     <div className="mb-2">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
+        className="relative flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
       >
-        <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
+        <div className="absolute -left-5 top-0 bottom-0 flex items-center">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-blue-500 dark:text-blue-400" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.5.4.8 1 .9 1.6M12 2a7 7 0 0 1 4 12.7c-.5.4-.8 1-.9 1.6"/></svg>
         </div>
         <span>

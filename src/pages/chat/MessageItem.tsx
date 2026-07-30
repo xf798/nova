@@ -54,10 +54,10 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
 
   if (isLoading) {
     return (
-      <div className="py-2 pl-6">
+      <div className="relative py-2 pl-5">
         {/* 召回在请求发出前就已确定，等待期间即可展示 */}
         {message.recall && <RecallBlock recall={message.recall} />}
-        <div className="-ml-6 w-6 flex-shrink-0 flex items-center h-8">
+        <div className="absolute -left-5 flex items-center h-8">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-gray-400" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
         </div>
       </div>
@@ -140,11 +140,12 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
   return (
     <div className="flex items-start group">
       {/*
-        pl-6 留出 24px 左边栏：过程行的图标用 -ml-6 悬挂进去，
-        文本因此与正文严格对齐成一列，层次靠边栏标记 + 小字灰度体现，
-        而不是靠位移（8px 那种「差一点对齐」最不协调）。
+        pl-5 留出 20px 左边栏：过程行的图标用 absolute -left-5 放进边栏，
+        文本因此与正文严格落在同一列。用绝对定位而非负 margin，
+        是为了绕过行上的 gap-2——负 margin 方案下 gap 会把文本再右推 8px，
+        导致「看着像对齐但差一点」。层次靠边栏标记 + 小字灰度体现。
       */}
-      <div className="flex-1 min-w-0 pl-6">
+      <div className="flex-1 min-w-0 pl-5">
 
         {/* 召回明细：请求发出前注入了哪些记忆/技能，位于过程之前 */}
         {message.recall && <RecallBlock recall={message.recall} />}

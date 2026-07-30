@@ -120,9 +120,9 @@ function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isAc
     <div className="my-2">
       <button
         onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
-        className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
+        className="relative flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
       >
-        <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
+        <div className="absolute -left-5 top-0 bottom-0 flex items-center">
           {isActive ? <SpinnerIcon /> : <CheckIcon className="text-purple-500 dark:text-purple-400" />}
         </div>
         <span className={isActive ? "animate-pulse" : ""}>{summary}</span>
@@ -145,9 +145,9 @@ function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact
   const duration = event.completedAt && event.at ? event.completedAt - event.at : undefined;
 
   return (
-    <div className={`${compact ? "" : "my-1"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
+    <div className={`${compact ? "" : "my-1"} relative flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
       {/* 顶层行的图标悬挂进左边栏；折叠组内部的行不悬挂，否则会跨过竖线 */}
-      <div className={`${compact ? "" : "-ml-6 w-6"} flex-shrink-0 flex items-center`}>
+      <div className={`${compact ? "flex-shrink-0" : "absolute -left-5 top-0 bottom-0"} flex items-center`}>
         {running ? <SpinnerIcon /> : failed ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
       </div>
       <span className="truncate min-w-0">{cleanToolTitle(event.title)}</span>
@@ -188,9 +188,9 @@ function ToolGroup({ events, isActive }: { events: TimelineToolEvent[]; isActive
     <div className="my-2">
       <button
         onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
-        className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors max-w-full"
+        className="relative flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors max-w-full"
       >
-        <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
+        <div className="absolute -left-5 top-0 bottom-0 flex items-center">
           {runningTool ? <SpinnerIcon /> : failedCount > 0 ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
         </div>
         <span className="shrink-0">
@@ -269,8 +269,8 @@ export function hasActiveWork(events: TimelineEvent[]): boolean {
 /** 尾部等待指示：流式中但无进行中单元时显示，避免看起来卡住 */
 function PendingRow() {
   return (
-    <div className="my-1 flex items-center gap-2 text-[12px] text-app-text-muted">
-      <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
+    <div className="my-1 relative flex items-center gap-2 text-[12px] text-app-text-muted">
+      <div className="absolute -left-5 top-0 bottom-0 flex items-center">
         <SpinnerIcon />
       </div>
       <span className="animate-pulse">Thinking</span>
