@@ -146,7 +146,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
 
         {/* 流式刚开始、还没有任何过程事件时的等待指示 */}
         {isStreaming && timelineEvents.length === 0 && (
-          <div className="mb-2 ml-3 flex items-center gap-2 text-[12px] text-app-text-muted">
+          <div className="mb-2 ml-2 flex items-center gap-2 text-[12px] text-app-text-muted">
             <div className="flex-shrink-0 flex items-center">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-gray-400" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
             </div>
