@@ -292,6 +292,217 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
+// ─── 内置 skill 同步 ───
+//
+// 目标：应用升级后，包内 skill 的更新（SKILL.md / scripts）能推到用户目录，
+// 同时不覆盖用户自己的改动，也绝不触碰凭据与运行时状态。
+//
+// 判断「用户改过」需要一个基线：manifest 记录每个文件上次同步时的 hash。
+//   - 本地缺失            → 复制
+//   - 本地 hash == 基线   → 用户没动过，覆盖为包内新版
+//   - 本地 hash != 基线   → 用户改过（或首次运行无基线），跳过并把当前 hash 记为新基线
+//
+// 包内不存在的 skill 目录（用户自建、蒸馏产出）完全不遍历，天然不受影响。
+
+/// 同步基线清单，存于 ~/.nova/skills/.sync-manifest.json
+const SKILL_SYNC_MANIFEST: &str = ".sync-manifest.json";
+
+/// 判断相对路径是否为「绝不写入」的凭据 / 运行时状态文件。
+///
+/// 包内理论上不含凭据（只放 *.example.json），此处是防御性拦截：
+/// 万一误把凭据打进包，也不会覆盖用户已有的配置。
+fn is_protected_skill_file(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+
+    // 浏览器登录态等运行时产物
+    if name.contains("storage_state") {
+        return true;
+    }
+    // 运行时目录
+    if rel.contains("/.venv/") || rel.contains("/__pycache__/") || name.ends_with(".pyc") {
+        return true;
+    }
+    // config/ 下的真实配置（*.example.json 是模板，允许同步）
+    if rel.contains("config/") && name.ends_with(".json") && !name.ends_with(".example.json") {
+        return true;
+    }
+    false
+}
+
+fn sha256_file(path: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// 收集目录下所有文件的相对路径（跳过运行时目录）
+fn collect_rel_files(root: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name == ".venv" || name == "__pycache__" || name == ".git" {
+                continue;
+            }
+            collect_rel_files(&path, base, out);
+        } else if let Ok(rel) = path.strip_prefix(base) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// 同步结果统计（仅用于日志）
+struct SkillSyncStats {
+    copied: usize,
+    updated: usize,
+    kept: usize,
+    protected: usize,
+}
+
+/// 把包内内置 skill 同步到用户目录。
+fn sync_bundled_skills(
+    bundled_root: &std::path::Path,
+    dest_root: &std::path::Path,
+    app_version: &str,
+) -> SkillSyncStats {
+    let mut stats = SkillSyncStats { copied: 0, updated: 0, kept: 0, protected: 0 };
+
+    let manifest_path = dest_root.join(SKILL_SYNC_MANIFEST);
+
+    // 读取旧 manifest
+    let old: serde_json::Value = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // 同版本已同步过则跳过（首次无 manifest 时仍需建立基线）
+    if old.get("lastSyncedAppVersion").and_then(|v| v.as_str()) == Some(app_version) {
+        safe_println!("[Nova] Skill 同步: 版本 {} 已同步过，跳过", app_version);
+        return stats;
+    }
+
+    let old_files = old.get("files").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let mut new_files = serde_json::Map::new();
+
+    let skill_dirs = match std::fs::read_dir(bundled_root) {
+        Ok(e) => e,
+        Err(_) => return stats,
+    };
+
+    for entry in skill_dirs.flatten() {
+        let src_skill = entry.path();
+        if !src_skill.is_dir() {
+            continue;
+        }
+        let skill_name = entry.file_name().to_string_lossy().to_string();
+        let dest_skill = dest_root.join(&skill_name);
+
+        // 首次释放：整目录复制
+        if !dest_skill.exists() {
+            if let Err(e) = copy_dir_recursive(&src_skill, &dest_skill) {
+                safe_println!("[Nova] Skill 释放失败 {}: {}", skill_name, e);
+                continue;
+            }
+            let mut rels = Vec::new();
+            collect_rel_files(&src_skill, &src_skill, &mut rels);
+            for rel in rels {
+                let key = format!("{}/{}", skill_name, rel);
+                if let Some(h) = sha256_file(&dest_skill.join(&rel)) {
+                    new_files.insert(key, serde_json::json!(h));
+                }
+                stats.copied += 1;
+            }
+            safe_println!("[Nova] Skill 首次释放: {}", skill_name);
+            continue;
+        }
+
+        // 已存在：逐文件比对
+        let mut rels = Vec::new();
+        collect_rel_files(&src_skill, &src_skill, &mut rels);
+
+        for rel in rels {
+            let key = format!("{}/{}", skill_name, rel);
+
+            if is_protected_skill_file(&rel) {
+                stats.protected += 1;
+                continue;
+            }
+
+            let src_file = src_skill.join(&rel);
+            let dest_file = dest_skill.join(&rel);
+
+            // 本地缺失 → 直接补
+            if !dest_file.exists() {
+                if let Some(parent) = dest_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::copy(&src_file, &dest_file).is_ok() {
+                    if let Some(h) = sha256_file(&dest_file) {
+                        new_files.insert(key, serde_json::json!(h));
+                    }
+                    stats.copied += 1;
+                    safe_println!("[Nova] Skill 新增文件: {}", rel);
+                }
+                continue;
+            }
+
+            let local_hash = match sha256_file(&dest_file) {
+                Some(h) => h,
+                None => continue,
+            };
+            let baseline = old_files.get(&key).and_then(|v| v.as_str());
+
+            if baseline == Some(local_hash.as_str()) {
+                // 用户未改动过 → 可安全覆盖
+                let src_hash = sha256_file(&src_file);
+                if src_hash.as_deref() == Some(local_hash.as_str()) {
+                    // 内容本就相同，无需写盘
+                    new_files.insert(key, serde_json::json!(local_hash));
+                    stats.kept += 1;
+                } else if std::fs::copy(&src_file, &dest_file).is_ok() {
+                    if let Some(h) = sha256_file(&dest_file) {
+                        new_files.insert(key, serde_json::json!(h));
+                    }
+                    stats.updated += 1;
+                    safe_println!("[Nova] Skill 更新文件: {}", rel);
+                }
+            } else {
+                // 用户改过，或首次运行无基线 → 保留本地，并将当前状态记为新基线
+                new_files.insert(key, serde_json::json!(local_hash));
+                stats.kept += 1;
+            }
+        }
+    }
+
+    // 写回 manifest
+    let manifest = serde_json::json!({
+        "lastSyncedAppVersion": app_version,
+        "updatedAt": chrono_now(),
+        "files": new_files,
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+        let _ = std::fs::write(&manifest_path, json);
+    }
+
+    stats
+}
+
+/// 简易 ISO8601 时间戳（避免为此引入 chrono 依赖）
+fn chrono_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("epoch:{}", secs)
+}
+
 /// 从 SKILL.md 的 frontmatter 中解析 description
 fn parse_skill_description(path: &PathBuf) -> String {
     let content = match std::fs::read_to_string(path) {
@@ -1340,7 +1551,8 @@ pub fn run() {
                 }
             }
 
-            // 释放内置 skill 到 ~/.nova/skills/（不覆盖已有）
+            // 同步内置 skill 到 ~/.nova/skills/
+            // 文件级同步：补新增、覆盖用户未改动的、保留用户改过的、不碰凭据
             let skills_dest = skills_dir();
             let _ = std::fs::create_dir_all(&skills_dest);
             safe_println!("[Nova] Skills dir: {:?}", skills_dest);
@@ -1348,23 +1560,12 @@ pub fn run() {
                 let bundled_skills = resource_path.join("resources").join("skills");
                 safe_println!("[Nova] Bundled skills path: {:?} (exists={})", bundled_skills, bundled_skills.exists());
                 if bundled_skills.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&bundled_skills) {
-                        for entry in entries.flatten() {
-                            let src = entry.path();
-                            if !src.is_dir() { continue; }
-                            let name = match src.file_name() {
-                                Some(n) => n.to_os_string(),
-                                None => continue,
-                            };
-                            let dest = skills_dest.join(&name);
-                            if !dest.exists() {
-                                let _ = copy_dir_recursive(&src, &dest);
-                                safe_println!("[Nova] 释放内置 skill: {}", name.to_string_lossy());
-                            } else {
-                                safe_println!("[Nova] 内置 skill 已存在，跳过: {}", name.to_string_lossy());
-                            }
-                        }
-                    }
+                    let app_version = app.package_info().version.to_string();
+                    let stats = sync_bundled_skills(&bundled_skills, &skills_dest, &app_version);
+                    safe_println!(
+                        "[Nova] Skill 同步完成 (v{}): 新增 {} / 更新 {} / 保留 {} / 受保护 {}",
+                        app_version, stats.copied, stats.updated, stats.kept, stats.protected
+                    );
                 }
             }
 
@@ -1384,4 +1585,288 @@ pub fn run() {
 
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod skill_sync_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "nova-skill-sync-test-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn write(path: &std::path::Path, content: &str) {
+        if let Some(p) = path.parent() {
+            fs::create_dir_all(p).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    fn read(path: &std::path::Path) -> String {
+        fs::read_to_string(path).unwrap_or_default()
+    }
+
+    // ─── 分类规则 ───
+
+    #[test]
+    fn protected_covers_credentials_and_runtime_state() {
+        // 凭据：config/ 下的非 example json
+        assert!(is_protected_skill_file("code-deploy/config/sso_config.json"));
+        assert!(is_protected_skill_file("code-deploy/config/jenkins_config.json"));
+        assert!(is_protected_skill_file("code-deploy/config/gerrit_config.json"));
+        // 登录态
+        assert!(is_protected_skill_file("code-deploy/config/storage_state.json"));
+        assert!(is_protected_skill_file("code-deploy/config/arca_storage_state.json"));
+        // 运行时目录
+        assert!(is_protected_skill_file("x/.venv/lib/foo.py"));
+        assert!(is_protected_skill_file("x/__pycache__/a.pyc"));
+        assert!(is_protected_skill_file("x/scripts/a.pyc"));
+    }
+
+    #[test]
+    fn protected_excludes_code_and_templates() {
+        // 代码类必须可同步
+        assert!(!is_protected_skill_file("code-deploy/SKILL.md"));
+        assert!(!is_protected_skill_file("code-deploy/scripts/arca_release.py"));
+        assert!(!is_protected_skill_file("nova-tasks/scripts/tasks.sh"));
+        // 模板必须可同步
+        assert!(!is_protected_skill_file("code-deploy/config/sso_config.example.json"));
+        assert!(!is_protected_skill_file("code-deploy/config/gerrit_config.example.json"));
+        // 非 config 目录下的 json（如 tchub 的 schema）可同步
+        assert!(!is_protected_skill_file("tchub/skill.config.json"));
+    }
+
+    // ─── 首次释放 ───
+
+    #[test]
+    fn first_install_copies_everything_and_records_baseline() {
+        let root = tmpdir("first");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        write(&bundled.join("demo/scripts/run.sh"), "echo v1");
+
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        assert_eq!(read(&dest.join("demo/SKILL.md")), "v1");
+        assert_eq!(read(&dest.join("demo/scripts/run.sh")), "echo v1");
+        assert_eq!(stats.copied, 2);
+
+        // manifest 已建立
+        let m: serde_json::Value =
+            serde_json::from_str(&read(&dest.join(SKILL_SYNC_MANIFEST))).unwrap();
+        assert_eq!(m["lastSyncedAppVersion"], "1.0.0");
+        assert!(m["files"]["demo/SKILL.md"].is_string());
+    }
+
+    // ─── 三态核心行为 ───
+
+    #[test]
+    fn unmodified_file_gets_updated() {
+        let root = tmpdir("unmod");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        // 第一次：释放 v1，建立基线
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+        assert_eq!(read(&dest.join("demo/SKILL.md")), "v1");
+
+        // 包内升级到 v2，用户未改动过本地
+        write(&bundled.join("demo/SKILL.md"), "v2");
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.1");
+
+        assert_eq!(read(&dest.join("demo/SKILL.md")), "v2", "未改动的文件应被更新");
+        assert_eq!(stats.updated, 1);
+    }
+
+    #[test]
+    fn user_modified_file_is_preserved() {
+        let root = tmpdir("usermod");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        // 用户改了本地
+        write(&dest.join("demo/SKILL.md"), "用户自己的版本");
+
+        // 包内也升级了
+        write(&bundled.join("demo/SKILL.md"), "v2");
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.1");
+
+        assert_eq!(
+            read(&dest.join("demo/SKILL.md")),
+            "用户自己的版本",
+            "用户改过的文件不能被覆盖"
+        );
+        assert_eq!(stats.kept, 1);
+        assert_eq!(stats.updated, 0);
+    }
+
+    #[test]
+    fn missing_file_is_added() {
+        let root = tmpdir("missing");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        // 新版本新增了一个脚本
+        write(&bundled.join("demo/scripts/new.sh"), "echo new");
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.1");
+
+        assert_eq!(read(&dest.join("demo/scripts/new.sh")), "echo new");
+        assert!(stats.copied >= 1);
+    }
+
+    // ─── 安全性 ───
+
+    #[test]
+    fn credentials_are_never_overwritten() {
+        let root = tmpdir("cred");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        // 用户填了真实凭据
+        write(&dest.join("demo/config/sso_config.json"), r#"{"password":"real"}"#);
+        // 假设包内误打进了一份凭据
+        write(&bundled.join("demo/config/sso_config.json"), r#"{"password":"FROM_BUNDLE"}"#);
+
+        sync_bundled_skills(&bundled, &dest, "1.0.2");
+
+        assert_eq!(
+            read(&dest.join("demo/config/sso_config.json")),
+            r#"{"password":"real"}"#,
+            "用户凭据绝不能被包内内容覆盖"
+        );
+    }
+
+    #[test]
+    fn user_own_skills_are_untouched() {
+        let root = tmpdir("ownskill");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        // 用户自建 / 蒸馏产出的 skill，包内不存在
+        write(&dest.join("my-own-skill/SKILL.md"), "我自己写的");
+        write(&dest.join("my-own-skill/scripts/x.sh"), "mine");
+
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        assert_eq!(read(&dest.join("my-own-skill/SKILL.md")), "我自己写的");
+        assert_eq!(read(&dest.join("my-own-skill/scripts/x.sh")), "mine");
+    }
+
+    #[test]
+    fn extra_user_files_inside_bundled_skill_are_kept() {
+        let root = tmpdir("extra");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        // 用户在内置 skill 目录里加了自己的脚本
+        write(&dest.join("demo/scripts/my_helper.sh"), "mine");
+
+        write(&bundled.join("demo/SKILL.md"), "v2");
+        sync_bundled_skills(&bundled, &dest, "1.0.1");
+
+        assert_eq!(
+            read(&dest.join("demo/scripts/my_helper.sh")),
+            "mine",
+            "包内没有的用户文件不应被删除"
+        );
+    }
+
+    // ─── 迁移与幂等 ───
+
+    #[test]
+    fn migration_without_manifest_does_not_clobber() {
+        let root = tmpdir("migrate");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+
+        // 模拟老用户：已有 skill 目录但没有 manifest，且内容比包内新
+        write(&dest.join("demo/SKILL.md"), "用户目录的新版本");
+        write(&bundled.join("demo/SKILL.md"), "包内的旧版本");
+        assert!(!dest.join(SKILL_SYNC_MANIFEST).exists());
+
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        assert_eq!(
+            read(&dest.join("demo/SKILL.md")),
+            "用户目录的新版本",
+            "首次运行无基线时不得覆盖本地内容"
+        );
+        assert_eq!(stats.kept, 1);
+        // 且已把当前状态记为基线
+        let m: serde_json::Value =
+            serde_json::from_str(&read(&dest.join(SKILL_SYNC_MANIFEST))).unwrap();
+        assert!(m["files"]["demo/SKILL.md"].is_string());
+    }
+
+    #[test]
+    fn same_version_is_skipped() {
+        let root = tmpdir("samever");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        write(&bundled.join("demo/SKILL.md"), "v1");
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        // 同版本再次同步：即使包内变了也不应处理
+        write(&bundled.join("demo/SKILL.md"), "v2");
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        assert_eq!(stats.copied, 0);
+        assert_eq!(stats.updated, 0);
+        assert_eq!(read(&dest.join("demo/SKILL.md")), "v1", "同版本应整体跳过");
+    }
+
+    #[test]
+    fn baseline_advances_so_next_release_can_update() {
+        let root = tmpdir("advance");
+        let bundled = root.join("bundled");
+        let dest = root.join("dest");
+
+        // 老用户迁移：无 manifest，本地内容被记为基线
+        write(&dest.join("demo/SKILL.md"), "local");
+        write(&bundled.join("demo/SKILL.md"), "local"); // 回灌后包内 == 本地
+        sync_bundled_skills(&bundled, &dest, "1.0.0");
+
+        // 下个版本包内升级，用户期间没动过 → 应该能更新
+        write(&bundled.join("demo/SKILL.md"), "v2");
+        let stats = sync_bundled_skills(&bundled, &dest, "1.0.1");
+
+        assert_eq!(read(&dest.join("demo/SKILL.md")), "v2");
+        assert_eq!(stats.updated, 1);
+    }
 }
