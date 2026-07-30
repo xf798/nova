@@ -1,9 +1,9 @@
-import { useState, useEffect, memo } from "react";
+import { useState, memo } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import type { Message } from "../../core/types";
+import type { TimelineEvent } from "../../connectors";
+import { deriveLegacyTimeline } from "../../connectors/timeline";
+import ProcessTimeline from "./ProcessTimeline";
 
 // ─── Tool Call Types ───
 interface ToolCallInfo {
@@ -33,33 +33,25 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
 
   const displayContent = (message.content || "").trimEnd();
   const meta = message.meta;
-  const toolCalls: ToolCallInfo[] = (meta?.toolCalls as ToolCallInfo[]) || [];
 
-  const sortedToolCalls = [...toolCalls].sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
-  const now = Date.now();
-  const MIN_DISPLAY_MS = 1000;
-  const activeToolCalls = sortedToolCalls.filter(tc =>
-    tc.status === "in_progress" || tc.status === "pending" ||
-    ((tc.status === "completed" || tc.status === "failed") && tc.completedAt && (now - tc.completedAt) < MIN_DISPLAY_MS)
-  );
-  const completedToolCalls = sortedToolCalls.filter(tc =>
-    (tc.status === "completed" || tc.status === "failed") &&
-    (!tc.completedAt || (now - tc.completedAt) >= MIN_DISPLAY_MS)
-  );
-  const [toolListExpanded, setToolListExpanded] = useState(false);
-  const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  // 过程时间线：新消息由连接器产出；历史消息现场降级出近似时间线，
+  // 使渲染只需一套代码（旧数据无文本位置信息，约定 思考 → 工具 → 正文）
+  const timelineEvents: TimelineEvent[] = meta?.timeline && meta.timeline.length > 0
+    ? meta.timeline
+    : deriveLegacyTimeline({
+        content: displayContent,
+        thought: meta?.thought,
+        toolCalls: (meta?.toolCalls as ToolCallInfo[] | undefined)?.map(tc => ({
+          toolCallId: tc.toolCallId,
+          title: tc.title,
+          kind: tc.kind,
+          status: tc.status as "pending" | "in_progress" | "completed" | "failed",
+          startedAt: tc.startedAt,
+          completedAt: tc.completedAt,
+        })),
+      });
+
   const [recallExpanded, setRecallExpanded] = useState(false);
-
-  const [, forceRender] = useState(0);
-  useEffect(() => {
-    const recentlyCompleted = sortedToolCalls.filter(tc =>
-      (tc.status === "completed" || tc.status === "failed") && tc.completedAt && (Date.now() - tc.completedAt) < MIN_DISPLAY_MS
-    );
-    if (recentlyCompleted.length > 0) {
-      const timer = setTimeout(() => forceRender(n => n + 1), MIN_DISPLAY_MS);
-      return () => clearTimeout(timer);
-    }
-  }, [sortedToolCalls]);
 
   if (isLoading) {
     return (
@@ -148,86 +140,18 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
     <div className="flex items-start group">
       <div className="flex-1 min-w-0">
 
-        {isStreaming && activeToolCalls.length === 0 && (
-          <div className="mb-2">
-            <div className="flex items-start gap-2 text-[12px] text-app-text-muted">
-              <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-gray-400" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-              </div>
-              {meta?.thought ? (
-                <div className="flex-1 min-w-0 whitespace-pre-wrap leading-relaxed max-h-[300px] overflow-y-auto pt-1" style={{ opacity: 0.7 }}>
-                  {meta.thought}
-                </div>
-              ) : (
-                <span className="pt-1 animate-pulse">Thinking</span>
-              )}
+        {/* 流式刚开始、还没有任何过程事件时的等待指示 */}
+        {isStreaming && timelineEvents.length === 0 && (
+          <div className="mb-2 flex items-center gap-2 text-[12px] text-app-text-muted">
+            <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-gray-400" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
             </div>
+            <span className="animate-pulse">Thinking</span>
           </div>
         )}
 
-        {activeToolCalls.length > 0 && (
-          <div className="mb-2 flex flex-col gap-1">
-            {activeToolCalls.map((tc) => (
-              <div key={tc.toolCallId} className="flex items-center gap-2 text-[12px] text-app-text-muted animate-pulse">
-                <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-gray-400" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                </div>
-                <span className="truncate">{tc.title}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {!isStreaming && meta?.thought && (
-          <div className="mb-2">
-            <button
-              onClick={() => setThoughtExpanded(!thoughtExpanded)}
-              className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
-            >
-              <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-purple-500 dark:text-purple-400" strokeWidth="2.5" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
-              </div>
-              <span>已思考</span>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" className={`transition-transform duration-200 ${thoughtExpanded ? "rotate-180" : ""}`} strokeWidth="2" strokeLinecap="round"><path d="M6 9l6 6 6-6"/></svg>
-            </button>
-
-            {thoughtExpanded && (
-              <div className="mt-1.5 ml-7 text-[12px] leading-relaxed text-app-text-muted whitespace-pre-wrap max-h-[400px] overflow-y-auto">
-                {meta.thought}
-              </div>
-            )}
-          </div>
-        )}
-
-        {completedToolCalls.length > 0 && (
-          <div className="mb-2">
-            <button
-              onClick={() => setToolListExpanded(!toolListExpanded)}
-              className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
-            >
-              <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-green-600 dark:text-green-400" strokeWidth="2.5" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
-              </div>
-              <span>{completedToolCalls.length} 个工具已调用</span>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" className={`transition-transform duration-200 ${toolListExpanded ? "rotate-180" : ""}`} strokeWidth="2" strokeLinecap="round"><path d="M6 9l6 6 6-6"/></svg>
-            </button>
-
-            {toolListExpanded && (
-              <div className="mt-1.5 ml-7 flex flex-col gap-0.5">
-                {completedToolCalls.map((tc) => (
-                  <div key={tc.toolCallId} className="flex items-center gap-1.5 text-[11px] text-app-text-muted py-0.5">
-                    {tc.status === "completed" ? (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-green-600 dark:text-green-400 flex-shrink-0" strokeWidth="2" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
-                    ) : (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-red-500 flex-shrink-0" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-                    )}
-                    <span className="truncate">{tc.title}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {/* 过程与正文按真实顺序内联渲染 */}
+        <ProcessTimeline events={timelineEvents} isStreaming={isStreaming} />
 
         {/* 召回明细（可观测）：本次注入的记忆/技能 */}
         {message.recall && (message.recall.memories.length > 0 || message.recall.skills.length > 0) && (
@@ -288,70 +212,6 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
                 )}
               </div>
             )}
-          </div>
-        )}
-
-        {displayContent && (
-          <div className="markdown-body text-[14px] leading-relaxed text-app-text">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={{
-                table: ({ children }) => (
-                  <div className="overflow-x-auto my-3 rounded-lg border border-app-border">
-                    <table className="min-w-full">{children}</table>
-                  </div>
-                ),
-                pre: ({ children }) => {
-                  const codeChild = Array.isArray(children)
-                    ? children.find((c: any) => c?.props?.className)
-                    : (children as any)?.props?.className ? children : null;
-                  const className = (codeChild as any)?.props?.className || "";
-                  const langMatch = className.match(/(?:language-|hljs-)(\w+)/);
-                  const lang = langMatch ? langMatch[1] : "";
-
-                  return (
-                    <div className="code-block-wrapper relative group my-3 rounded-xl overflow-hidden bg-[var(--code-block-bg)]">
-                      <div className="flex items-center justify-between px-4 h-9">
-                        <div className="flex items-center gap-2 text-[12px] text-app-text-secondary">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-60">
-                            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-                          </svg>
-                          <span className="font-medium uppercase text-[11px] tracking-wide">{lang || "Code"}</span>
-                        </div>
-                        <button
-                          className="text-app-text-muted hover:text-app-text transition-colors p-1 rounded"
-                          title="复制代码"
-                          onClick={(e) => {
-                            const pre = (e.currentTarget.closest(".code-block-wrapper") as HTMLElement)?.querySelector("pre");
-                            const code = pre?.textContent || "";
-                            navigator.clipboard.writeText(code);
-                            const btn = e.currentTarget;
-                            const originalHTML = btn.innerHTML;
-                            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-                            setTimeout(() => { btn.innerHTML = originalHTML; }, 1500);
-                          }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                          </svg>
-                        </button>
-                      </div>
-                      <pre className="!rounded-none !border-0 !my-0">{children}</pre>
-                    </div>
-                  );
-                },
-                code: ({ className, children, ...props }) => {
-                  const isBlock = className?.includes("hljs") || className?.includes("language-");
-                  if (isBlock) {
-                    return <code className={className} {...props}>{children}</code>;
-                  }
-                  return <code className="inline-code" {...props}>{children}</code>;
-                },
-              }}
-            >
-              {displayContent}
-            </ReactMarkdown>
           </div>
         )}
 
