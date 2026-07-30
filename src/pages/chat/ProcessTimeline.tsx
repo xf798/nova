@@ -16,6 +16,16 @@ import type { TimelineEvent, TimelineThoughtEvent, TimelineToolEvent } from "../
 /** 思考段结束后延迟收起的时长；留出余量避免「一闪而逝」 */
 const COLLAPSE_DELAY_MS = 600;
 
+/** 连续工具数达到此值才折叠成一组；低于此值直接平铺更易读 */
+const TOOL_GROUP_THRESHOLD = 3;
+
+/**
+ * 单组展开时最多显示的工具行数。
+ * 实测历史数据里出现过 220 个连续工具的组，全量展开会淹没会话，
+ * 因此只展示最近的若干条并提示其余数量。
+ */
+const TOOL_GROUP_MAX_VISIBLE = 30;
+
 /** 把毫秒格式化为人类可读耗时 */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -23,6 +33,36 @@ export function formatDuration(ms: number): string {
   const m = Math.floor(ms / 60_000);
   const s = Math.round((ms % 60_000) / 1000);
   return `${m}m${s}s`;
+}
+
+/**
+ * 清理工具标题中的噪音前缀。
+ *
+ * 执行类工具的 title 形如：
+ *   Running: export PATH="/opt/homebrew/bin:..."; cd /Users/x/proj; grep -n "foo"
+ * 环境变量与 cd 前缀会把有效信息挤出可视区域，这里剥掉它们，
+ * 只保留真正执行的命令。
+ */
+export function cleanToolTitle(title: string): string {
+  const m = title.match(/^(Running:\s*)([\s\S]+)$/);
+  if (!m) return title;
+
+  const prefix = m[1];
+  const segments = m[2].split(";");
+  let i = 0;
+  // 跳过开头的环境变量赋值与目录切换
+  while (i < segments.length) {
+    const seg = segments[i].trim();
+    if (/^export\s+[A-Za-z_][A-Za-z0-9_]*=/.test(seg) || /^cd\s+\S/.test(seg) || seg === "") {
+      i++;
+      continue;
+    }
+    break;
+  }
+  // 全被剥掉说明这条命令本身就只是 env/cd，保留原样更诚实
+  if (i >= segments.length) return title;
+
+  return prefix + segments.slice(i).join(";").trim();
 }
 
 const SpinnerIcon = () => (
@@ -99,22 +139,114 @@ function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isAc
 }
 
 /** 工具行：单行展示，带状态图标与耗时 */
-function ToolRow({ event }: { event: TimelineToolEvent }) {
+function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact?: boolean }) {
   const running = event.status === "in_progress" || event.status === "pending";
   const failed = event.status === "failed";
   const duration = event.completedAt && event.at ? event.completedAt - event.at : undefined;
 
   return (
-    <div className={`my-1 flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
+    <div className={`${compact ? "" : "my-1"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
       <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
         {running ? <SpinnerIcon /> : failed ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
       </div>
-      <span className="truncate min-w-0">{event.title}</span>
+      <span className="truncate min-w-0">{cleanToolTitle(event.title)}</span>
       {duration !== undefined && !running && (
         <span className="shrink-0 text-app-text-muted opacity-60">{formatDuration(duration)}</span>
       )}
     </div>
   );
+}
+
+/**
+ * 连续工具分组：一串没有被文本/思考打断的工具调用收成一个可折叠块。
+ *
+ * 长任务里连续十几次读文件/执行命令会把正文挤出屏幕，
+ * 折叠后只占一行；进行中自动展开以便观察进度，结束后延迟收起。
+ */
+function ToolGroup({ events, isActive }: { events: TimelineToolEvent[]; isActive: boolean }) {
+  const [expanded, setExpanded] = useState(isActive);
+  const userToggled = useRef(false);
+
+  useEffect(() => {
+    if (isActive) {
+      if (!userToggled.current) setExpanded(true);
+      return;
+    }
+    if (userToggled.current) return;
+    const timer = setTimeout(() => {
+      if (!userToggled.current) setExpanded(false);
+    }, COLLAPSE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [isActive]);
+
+  const failedCount = events.filter(e => e.status === "failed").length;
+  const runningTool = events.find(e => e.status === "in_progress" || e.status === "pending");
+  const totalMs = events.reduce((sum, e) => sum + (e.completedAt && e.at ? e.completedAt - e.at : 0), 0);
+
+  return (
+    <div className="my-2">
+      <button
+        onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
+        className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors max-w-full"
+      >
+        <div className="w-7 h-7 flex items-center justify-center flex-shrink-0">
+          {runningTool ? <SpinnerIcon /> : failedCount > 0 ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
+        </div>
+        <span className="shrink-0">
+          {events.length} 个工具
+          {failedCount > 0 && <span className="text-red-500">（{failedCount} 个失败）</span>}
+        </span>
+        {/* 折叠态下仍显示当前正在执行的工具，保持「跟随」的感知 */}
+        {runningTool && !expanded && (
+          <span className="truncate min-w-0 opacity-60">{cleanToolTitle(runningTool.title)}</span>
+        )}
+        {!runningTool && totalMs > 0 && (
+          <span className="shrink-0 opacity-60">{formatDuration(totalMs)}</span>
+        )}
+        <Chevron open={expanded} />
+      </button>
+
+      {expanded && (
+        <div className="mt-1 ml-7 pl-3 border-l border-app-border flex flex-col gap-0.5">
+          {events.length > TOOL_GROUP_MAX_VISIBLE && (
+            <p className="text-[11px] text-app-text-muted opacity-60 py-0.5">
+              仅显示最近 {TOOL_GROUP_MAX_VISIBLE} 条，另有 {events.length - TOOL_GROUP_MAX_VISIBLE} 条已省略
+            </p>
+          )}
+          {events.slice(-TOOL_GROUP_MAX_VISIBLE).map(e => (
+            <ToolRow key={e.toolCallId} event={e} compact />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 渲染单元：文本/思考为单个事件，连续工具合并为一组 */
+type RenderUnit =
+  | { type: "single"; event: TimelineEvent; index: number }
+  | { type: "toolGroup"; events: TimelineToolEvent[]; lastIndex: number };
+
+/** 把事件序列切成渲染单元，连续的工具事件归为一组 */
+export function groupTimeline(events: TimelineEvent[]): RenderUnit[] {
+  const units: RenderUnit[] = [];
+  let i = 0;
+  while (i < events.length) {
+    const e = events[i];
+    if (e.kind !== "tool") {
+      units.push({ type: "single", event: e, index: i });
+      i++;
+      continue;
+    }
+    // 收集连续的工具事件
+    const group: TimelineToolEvent[] = [];
+    while (i < events.length && events[i].kind === "tool") {
+      group.push(events[i] as TimelineToolEvent);
+      i++;
+    }
+    units.push({ type: "toolGroup", events: group, lastIndex: i - 1 });
+  }
+  return units;
 }
 
 function ProcessTimeline({
@@ -124,14 +256,31 @@ function ProcessTimeline({
   events: TimelineEvent[];
   isStreaming: boolean;
 }) {
-  // 流式中最后一个事件视为「进行中」，用于驱动思考段展开与转圈
   const lastIndex = events.length - 1;
+  const units = groupTimeline(events);
 
   return (
     <>
-      {events.map((event, i) => {
-        const isLast = i === lastIndex;
-        const key = event.kind === "tool" ? `tool-${event.toolCallId}` : `${event.kind}-${i}`;
+      {units.map((unit, ui) => {
+        if (unit.type === "toolGroup") {
+          const { events: tools, lastIndex: groupLast } = unit;
+          // 组内有工具在跑，或流式且该组是最后一个单元 → 视为进行中
+          const hasRunning = tools.some(t => t.status === "in_progress" || t.status === "pending");
+          const isActive = hasRunning || (isStreaming && groupLast === lastIndex);
+
+          // 数量少时平铺更易读，不引入折叠层级
+          if (tools.length < TOOL_GROUP_THRESHOLD) {
+            return (
+              <div key={`tg-${ui}`}>
+                {tools.map(t => <ToolRow key={t.toolCallId} event={t} />)}
+              </div>
+            );
+          }
+          return <ToolGroup key={`tg-${ui}`} events={tools} isActive={isActive} />;
+        }
+
+        const { event, index } = unit;
+        const key = `${event.kind}-${index}`;
 
         if (event.kind === "text") {
           // 空白片段不渲染，避免产生空段落间距
@@ -140,13 +289,9 @@ function ProcessTimeline({
           return <MarkdownBody key={key}>{text}</MarkdownBody>;
         }
 
-        if (event.kind === "thought") {
-          // 思考段的「进行中」判定：流式且是最后一个事件且尚未封段
-          const active = isStreaming && isLast && !event.endedAt;
-          return <ThoughtSegment key={key} event={event} isActive={active} />;
-        }
-
-        return <ToolRow key={key} event={event} />;
+        // 思考段的「进行中」判定：流式且是最后一个事件且尚未封段
+        const active = isStreaming && index === lastIndex && !(event as TimelineThoughtEvent).endedAt;
+        return <ThoughtSegment key={key} event={event as TimelineThoughtEvent} isActive={active} />;
       })}
     </>
   );
