@@ -117,12 +117,12 @@ function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isAc
       : "已思考";
 
   return (
-    <div className="my-2 ml-2">
+    <div className="my-2">
       <button
         onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
         className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
       >
-        <div className="flex-shrink-0 flex items-center">
+        <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
           {isActive ? <SpinnerIcon /> : <CheckIcon className="text-purple-500 dark:text-purple-400" />}
         </div>
         <span className={isActive ? "animate-pulse" : ""}>{summary}</span>
@@ -130,7 +130,7 @@ function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isAc
       </button>
 
       {expanded && (
-        <div className="mt-1.5 ml-[22px] pl-3 border-l border-app-border text-[12px] leading-relaxed text-app-text-muted whitespace-pre-wrap">
+        <div className="mt-1.5 pl-3 border-l border-app-border text-[12px] leading-relaxed text-app-text-muted whitespace-pre-wrap">
           {event.text}
         </div>
       )}
@@ -145,8 +145,9 @@ function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact
   const duration = event.completedAt && event.at ? event.completedAt - event.at : undefined;
 
   return (
-    <div className={`${compact ? "" : "my-1 ml-2"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
-      <div className="flex-shrink-0 flex items-center">
+    <div className={`${compact ? "" : "my-1"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
+      {/* 顶层行的图标悬挂进左边栏；折叠组内部的行不悬挂，否则会跨过竖线 */}
+      <div className={`${compact ? "" : "-ml-6 w-6"} flex-shrink-0 flex items-center`}>
         {running ? <SpinnerIcon /> : failed ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
       </div>
       <span className="truncate min-w-0">{cleanToolTitle(event.title)}</span>
@@ -184,12 +185,12 @@ function ToolGroup({ events, isActive }: { events: TimelineToolEvent[]; isActive
   const totalMs = events.reduce((sum, e) => sum + (e.completedAt && e.at ? e.completedAt - e.at : 0), 0);
 
   return (
-    <div className="my-2 ml-2">
+    <div className="my-2">
       <button
         onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
         className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors max-w-full"
       >
-        <div className="flex-shrink-0 flex items-center">
+        <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
           {runningTool ? <SpinnerIcon /> : failedCount > 0 ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
         </div>
         <span className="shrink-0">
@@ -207,7 +208,7 @@ function ToolGroup({ events, isActive }: { events: TimelineToolEvent[]; isActive
       </button>
 
       {expanded && (
-        <div className="mt-1 ml-[22px] pl-3 border-l border-app-border flex flex-col gap-0.5">
+        <div className="mt-1 pl-3 border-l border-app-border flex flex-col gap-0.5">
           {events.length > TOOL_GROUP_MAX_VISIBLE && (
             <p className="text-[11px] text-app-text-muted opacity-60 py-0.5">
               仅显示最近 {TOOL_GROUP_MAX_VISIBLE} 条，另有 {events.length - TOOL_GROUP_MAX_VISIBLE} 条已省略
@@ -268,8 +269,8 @@ export function hasActiveWork(events: TimelineEvent[]): boolean {
 /** 尾部等待指示：流式中但无进行中单元时显示，避免看起来卡住 */
 function PendingRow() {
   return (
-    <div className="my-1 ml-2 flex items-center gap-2 text-[12px] text-app-text-muted">
-      <div className="flex-shrink-0 flex items-center">
+    <div className="my-1 flex items-center gap-2 text-[12px] text-app-text-muted">
+      <div className="-ml-6 w-6 flex-shrink-0 flex items-center">
         <SpinnerIcon />
       </div>
       <span className="animate-pulse">Thinking</span>
