@@ -16,9 +16,9 @@ function RecallBlock({ recall }: { recall: RecallInfo }) {
     <div className="mb-2">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="relative flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
+        className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
       >
-        <div className="absolute -left-5 top-0 bottom-0 flex items-center">
+        <div className="flex-shrink-0 flex items-center">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-blue-500 dark:text-blue-400" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.5.4.8 1 .9 1.6M12 2a7 7 0 0 1 4 12.7c-.5.4-.8 1-.9 1.6"/></svg>
         </div>
         <span>
@@ -31,7 +31,7 @@ function RecallBlock({ recall }: { recall: RecallInfo }) {
       </button>
 
       {expanded && (
-        <div className="mt-1.5 flex flex-col gap-2 max-w-[680px]">
+        <div className="mt-1.5 ml-[22px] flex flex-col gap-2 max-w-[680px]">
           {recall.skills.length > 0 && (
             <div className="flex flex-col gap-1">
               <span className="text-[10px] font-medium text-app-text-muted uppercase tracking-wide">技能</span>
