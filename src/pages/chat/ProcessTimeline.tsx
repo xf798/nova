@@ -117,7 +117,7 @@ function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isAc
       : "已思考";
 
   return (
-    <div className="my-2">
+    <div className="my-2 ml-3">
       <button
         onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
         className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
@@ -145,7 +145,7 @@ function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact
   const duration = event.completedAt && event.at ? event.completedAt - event.at : undefined;
 
   return (
-    <div className={`${compact ? "" : "my-1"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
+    <div className={`${compact ? "" : "my-1 ml-3"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
       <div className="flex-shrink-0 flex items-center">
         {running ? <SpinnerIcon /> : failed ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
       </div>
@@ -184,7 +184,7 @@ function ToolGroup({ events, isActive }: { events: TimelineToolEvent[]; isActive
   const totalMs = events.reduce((sum, e) => sum + (e.completedAt && e.at ? e.completedAt - e.at : 0), 0);
 
   return (
-    <div className="my-2">
+    <div className="my-2 ml-3">
       <button
         onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
         className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors max-w-full"

@@ -13,7 +13,7 @@ function RecallBlock({ recall }: { recall: RecallInfo }) {
   if (recall.memories.length === 0 && recall.skills.length === 0) return null;
 
   return (
-    <div className="mb-2">
+    <div className="mb-2 ml-3">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-2 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
