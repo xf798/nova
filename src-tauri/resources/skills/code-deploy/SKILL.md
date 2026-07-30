@@ -1,6 +1,6 @@
 ---
 name: code-deploy
-description: 代码提交、审查与部署技能。支持 Gerrit Code-Review（列出待审变更、批量 +2）和 Jenkins 构建部署（触发前端项目打包发布到指定环境）。当用户提到"提代码"、"审代码"、"Code-Review"、"CR"、"帮我review"、"帮我+2"、"outgoing reviews"、"部署"、"deploy"、"发布"、"打包"、"构建"、"build"、"上线"、"发到dev"、"发到test"、"发环境"、"jenkins"时触发。
+description: 代码提交、审查与部署技能。支持 Gerrit Code-Review（列出待审变更、批量 +2、查看 CR 代码 diff）、Jenkins 构建部署（触发前端项目打包发布到指定环境）和方舟发布中心（后端服务发布到 crm-cd/crm-ci/test 等环境）。当用户提到"提代码"、"审代码"、"Code-Review"、"CR"、"帮我review"、"帮我+2"、"outgoing reviews"、"看代码"、"查看CR"、"看看这个CR"、"代码diff"、"gerrit.ingageapp.com/c/"、"部署"、"deploy"、"发布"、"打包"、"构建"、"build"、"上线"、"发到dev"、"发到test"、"发环境"、"jenkins"、"方舟"、"arca"、"后端发布"、"发布服务"、"crm-cd"、"crm-ci"时触发。
 metadata:
   requires:
     bins: ["bash", "curl", "python3"]
@@ -8,21 +8,27 @@ metadata:
 
 # 代码提交、审查与部署
 
-整合 Gerrit Code-Review 和 Jenkins 构建部署能力，完全独立运行，无外部仓库依赖。
+整合 Gerrit Code-Review、Jenkins 构建部署和方舟后端发布能力，完全独立运行，无外部仓库依赖。
 
 ## 目录结构
 
 ```
-~/.pipeline-commander/skills/code-deploy/
+~/.nova/skills/code-deploy/
 ├── SKILL.md                          # 本文件
 ├── config/
-│   ├── sso_config.json               # SSO 登录凭据（Gerrit 认证用）
+│   ├── sso_config.json               # SSO 登录凭据（Gerrit + 方舟共用）
 │   ├── sso_config.example.json       # SSO 配置模板
+│   ├── gerrit_config.json            # Gerrit HTTP Password 认证（REST API 用）
+│   ├── gerrit_config.example.json    # Gerrit HTTP Password 配置模板
 │   ├── jenkins_config.json           # Jenkins 凭据
-│   └── jenkins_config.example.json   # Jenkins 配置模板
+│   ├── jenkins_config.example.json   # Jenkins 配置模板
+│   ├── arca_storage_state.json       # 方舟 SSO 会话状态（自动生成）
+│   └── storage_state.json            # Gerrit SSO 会话状态（自动生成）
 ├── scripts/
 │   ├── run_gerrit_review.sh          # Gerrit Review 入口（自动管理 venv）
-│   └── gerrit_review.py              # Gerrit Review 核心逻辑
+│   ├── gerrit_review.py              # Gerrit Review 核心逻辑
+│   ├── gerrit_view.sh                # Gerrit CR 代码查看（REST API）
+│   └── arca_release.py               # 方舟发布中心（后端服务发布）
 └── .venv/                            # 自动创建的 Python venv（含 Playwright）
 ```
 
@@ -35,6 +41,7 @@ metadata:
 在 Gerrit（`https://gerrit.ingageapp.com`）上完成：
 1. 列出当前用户提交的未合入变更（Outgoing Reviews）
 2. 对指定 change 批量提交 Code-Review +2
+3. **查看任意 CR 的变更详情、文件列表、代码 diff 和文件内容**
 
 ### 配置
 
@@ -87,6 +94,86 @@ bash ~/.pipeline-commander/skills/code-deploy/scripts/run_gerrit_review.sh --rev
 - **Code-Review +2 是强权限操作**，执行前必须让用户确认
 - 若账号无 +2 权限，API 会返回错误
 - `change_id` 使用 `--list` 结果中每条记录的 `id` 字段
+
+### 查看 CR 代码（REST API）
+
+通过 Gerrit REST API + HTTP Password 认证，直接查看任意 CR 的变更详情和代码内容。**无需 Playwright/浏览器**。
+
+#### 配置
+
+编辑 `~/.pipeline-commander/skills/code-deploy/config/gerrit_config.json`：
+
+```json
+{
+  "gerrit_url": "https://gerrit.ingageapp.com",
+  "username": "your-username",
+  "http_password": "your-http-password（在 Gerrit Settings → HTTP Credentials 生成）"
+}
+```
+
+#### 用法
+
+```bash
+SCRIPT=~/.nova/skills/code-deploy/scripts/gerrit_view.sh
+
+# 查看 CR 基本信息（项目、分支、标题、状态、行数统计）
+bash $SCRIPT --info <change_number>
+
+# 列出 CR 变更的所有文件（含增删行数和状态）
+bash $SCRIPT --files <change_number>
+
+# 查看指定文件的 diff（unified diff 格式）
+bash $SCRIPT --diff <change_number> <file_path>
+
+# 查看文件完整内容（新版本）
+bash $SCRIPT --content <change_number> <file_path>
+```
+
+#### 执行流程（当用户提供 Gerrit CR 链接或 change number）
+
+##### 第 1 步：解析 CR 编号
+
+从用户输入中提取 change number：
+- 直接数字：`637735`
+- URL 格式：`https://gerrit.ingageapp.com/c/project/+/637735` → 提取 `637735`
+
+##### 第 2 步：获取 CR 信息
+
+```bash
+bash ~/.nova/skills/code-deploy/scripts/gerrit_view.sh --info <change_number>
+```
+
+展示项目、分支、标题、状态、增删行数等基本信息。
+
+##### 第 3 步：列出变更文件
+
+```bash
+bash ~/.nova/skills/code-deploy/scripts/gerrit_view.sh --files <change_number>
+```
+
+以表格形式展示文件列表：
+
+```
+状态 | +行数 | -行数 | 文件路径
+```
+
+##### 第 4 步：按需查看 diff 或内容
+
+根据用户需求，查看特定文件的 diff 或完整内容：
+
+```bash
+# 查看 diff
+bash ~/.nova/skills/code-deploy/scripts/gerrit_view.sh --diff <change_number> "<file_path>"
+
+# 查看完整文件
+bash ~/.nova/skills/code-deploy/scripts/gerrit_view.sh --content <change_number> "<file_path>"
+```
+
+#### 注意事项
+
+- 需要 Gerrit HTTP Password（非 SSO 密码），在 Gerrit 网页 Settings → HTTP Credentials 生成
+- username 是 Gerrit 用户名（通常不含邮箱后缀），如 `wangxf` 而非 `wangxf@neocrm.com`
+- 只能查看有权限的项目的 CR
 
 ---
 
@@ -249,7 +336,120 @@ curl -s -u "{jenkins_username}:{jenkins_password}" \
 
 ---
 
-## 三、典型工作流
+## 三、方舟发布中心（后端服务）
+
+### 概述
+
+通过方舟监管控平台（`https://arca-devops.ingageapp.com`）的 Release Manager API 触发后端服务部署。
+认证走 xiaoshouyi OAuth2 SSO，与 Gerrit SSO 共用同一份 `sso_config.json`。
+
+### API 信息
+
+| 字段 | 值 |
+|------|-----|
+| 发布接口 | `POST /rm_api/v1/release_self/publish_services/` |
+| 发布历史 | `GET /rm_api/v1/release_history/?page=1&page_size=10` |
+| 发布配置 | `GET /rm_api/v1/release_config/` |
+| 认证方式 | Cookie `arca_oauth_token`（JWT），请求头带 `Authorization: JWT` |
+
+### 发布参数
+
+```json
+{
+  "env_list": ["crm-cd"],
+  "service_list": ["neo-apps-salescloud-ai-service"],
+  "param": {"BRANCH": "develop"}
+}
+```
+
+| 参数 | 说明 |
+|------|------|
+| env_list | 目标环境列表，常用：`crm-cd`(开发)、`crm-ci`(集成)、`test`(测试) |
+| service_list | 服务名列表（精确全名） |
+| param.BRANCH | 分支名：`develop`、`hotfix_v2604_2607`、`mr-release_v2604_2607` 等 |
+
+### 常用服务名
+
+| 服务 | 说明 |
+|------|------|
+| neo-apps-salescloud-ai-service | 客户画像/AI 后端 |
+| neo-apps-ai-agent-service | Agent Skill 服务 |
+| apps-salescloud-service | 销售云主服务 |
+| apps-servicecloud-service | 服务云主服务 |
+
+### 环境 ↔ 分支 映射
+
+| 环境 | 常用分支 |
+|------|----------|
+| crm-cd | develop |
+| crm-ci | develop |
+| test | hotfix_v2604_2607 / mr-release_v2604_2607 |
+
+### 执行流程
+
+#### 第 1 步：参数校验
+
+从用户输入中提取：
+- `service`（必填）：后端服务全名
+- `env`（可选，默认 `crm-cd`）：目标环境
+- `branch`（可选，默认 `develop`）：分支名
+
+#### 第 2 步：确认发布参数
+
+**⚠️ 后端服务发布是高风险操作**，执行前**必须**展示参数并等待用户确认：
+
+```
+即将触发方舟发布：
+  服务: neo-apps-salescloud-ai-service, neo-apps-ai-agent-service
+  环境: crm-cd
+  分支: develop
+确认执行？
+```
+
+#### 第 3 步：触发发布
+
+```bash
+VENV=~/.pipeline-commander/skills/code-deploy/.venv
+$VENV/bin/python ~/.nova/skills/code-deploy/scripts/arca_release.py \
+  --env crm-cd \
+  --branch develop \
+  --service neo-apps-salescloud-ai-service \
+  --service neo-apps-ai-agent-service
+```
+
+#### 第 4 步：汇报结果
+
+解析 API 响应，展示：
+- 发布是否成功入队
+- 如有 build_url 则提供构建链接
+
+#### 第 5 步（可选）：查看发布状态
+
+```bash
+$VENV/bin/python ~/.nova/skills/code-deploy/scripts/arca_release.py \
+  --history --service neo-apps-salescloud-ai-service --limit 3
+```
+
+### 其他命令
+
+```bash
+# 仅登录/刷新 session
+$VENV/bin/python ~/.nova/skills/code-deploy/scripts/arca_release.py --login
+
+# 查看当前发布配置（含当前迭代分支名）
+$VENV/bin/python ~/.nova/skills/code-deploy/scripts/arca_release.py --config
+```
+
+### 注意事项
+
+- 首次使用会通过 Playwright 自动走 SSO 登录，后续复用 `config/arca_storage_state.json`
+- Token 过期后脚本自动重新登录
+- 发布前建议先通过 `--history` 确认服务最近状态
+- 只能发布你有权限的服务
+
+---
+
+## 四、典型工作流
 
 ### 工作流 1：审查代码并 +2
 
@@ -276,6 +476,35 @@ curl -s -u "{jenkins_username}:{jenkins_password}" \
 1. 先执行 Code-Review 流程
 2. 确认 +2 成功后，执行部署流程
 
+### 工作流 4：查看 CR 代码
+
+**用户**: "https://gerrit.ingageapp.com/c/neo-ai-copilot-fe/+/637735 帮我看看这个代码" / "看看 CR 637735 的代码"
+
+1. 从 URL 或文本中提取 change number
+2. 执行 `gerrit_view.sh --info` 展示 CR 概要
+3. 执行 `gerrit_view.sh --files` 展示文件列表
+4. 根据用户需求执行 `--diff` 或 `--content` 查看具体文件
+5. 如用户要求 review，逐文件查看 diff 并给出代码审查意见
+
+### 工作流 5：发布后端服务
+
+**用户**: "帮我发布 neo-apps-salescloud-ai-service 和 neo-apps-ai-agent-service 到 crm-cd"
+
+1. 解析服务名、环境、分支
+2. 展示发布参数，等待用户确认
+3. 调用 `arca_release.py` 触发发布
+4. 汇报结果
+5. 可选：查看发布历史确认状态
+
+### 工作流 6：完整提交→审查→发布流程
+
+**用户**: "帮我把代码 +2 然后发布到 crm-cd"
+
+1. 先执行 Gerrit Code-Review +2
+2. 确认 +2 成功
+3. 触发方舟后端服务发布
+4. 如有前端项目，同时触发 Jenkins 前端构建
+
 ---
 
 ## 四、初始化指南
@@ -299,17 +528,30 @@ vim ~/.pipeline-commander/skills/code-deploy/config/jenkins_config.json
 
 填入 Jenkins 用户名、密码和默认发布者邮箱。
 
+### 3. Gerrit HTTP Password 配置（查看 CR 代码用）
+
+```bash
+vim ~/.pipeline-commander/skills/code-deploy/config/gerrit_config.json
+```
+
+填入 Gerrit 用户名和 HTTP Password（在 Gerrit 网页 Settings → HTTP Credentials 生成）。
+
 ---
 
-## 五、异常处理
+## 六、异常处理
 
 | 场景 | 处理 |
 |------|------|
 | Gerrit 未登录 | 脚本自动走 SSO 登录流程 |
 | SSO 配置缺失 | 提示用户编辑 `config/sso_config.json` |
+| Gerrit HTTP 认证失败 | 提示检查 `config/gerrit_config.json`，确认 username 不含邮箱后缀 |
+| CR 不存在或无权限 | 展示 "Not found" 错误，建议确认 change number 和项目权限 |
 | 无 +2 权限 | 展示 API 错误信息 |
 | Jenkins 认证失败 (401/403) | 提示检查 `config/jenkins_config.json` |
 | 项目名无法匹配 | 展示完整项目清单让用户选择 |
 | 分支名不合法 | 提示合法的分支名列表 |
+| 方舟 SSO 登录失败 | 脚本自动重试 SSO，失败则提示检查 `config/sso_config.json` |
+| 方舟发布 4003 认证过期 | 删除 `config/arca_storage_state.json` 后重试（脚本自动重新登录） |
+| 方舟发布服务名不存在 | 展示 API 错误信息，建议用 `--history` 确认正确服务名 |
 | venv 不存在 | 自动创建并安装依赖 |
 | Playwright 未安装 | 自动安装 |

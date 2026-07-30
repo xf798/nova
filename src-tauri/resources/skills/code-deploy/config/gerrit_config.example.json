@@ -1,0 +1,6 @@
+{
+  "_comment": "Gerrit HTTP Password 认证。在 Gerrit Settings → HTTP Credentials 生成密码。",
+  "gerrit_url": "https://gerrit.ingageapp.com",
+  "username": "your-username",
+  "http_password": "your-http-password"
+}

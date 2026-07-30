@@ -157,26 +157,114 @@ def _gerrit_api_via_browser(page: Any, method: str, path: str, body: Optional[di
         raise RuntimeError(f"Gerrit API {result['status']}: {path} — {result['text'][:200]}")
     return _strip_gerrit_prefix(result["text"])
 
+def _check_session_cookies(state_path: Path) -> bool:
+    """检查 storage_state 中的 cookie 是否可能仍然有效。
+    
+    返回 True 表示 cookie 可能有效，False 表示已明确过期。
+    """
+    if not state_path.exists():
+        _eprint("[session] storage_state 文件不存在")
+        return False
+
+    try:
+        data = json.loads(state_path.read_text("utf-8"))
+    except Exception as e:
+        _eprint(f"[session] 解析 storage_state 失败: {e}")
+        return False
+
+    cookies = data.get("cookies", [])
+    if not cookies:
+        _eprint("[session] storage_state 中无 cookie")
+        return False
+
+    now = time.time()
+    _eprint(f"[session] 共 {len(cookies)} 个 cookie，当前时间戳: {int(now)}")
+
+    gerrit_cookies_found = False
+    for c in cookies:
+        domain = c.get("domain", "")
+        name = c.get("name", "")
+        expires = c.get("expires", -1)
+
+        # 只关注 Gerrit 相关的关键 cookie
+        if "gerrit" in domain.lower():
+            gerrit_cookies_found = True
+            if expires > 0:
+                remaining = expires - now
+                if remaining <= 0:
+                    _eprint(f"[session] ❌ cookie 已过期: {name}@{domain} (过期于 {int(-remaining)}秒前)")
+                    return False
+                else:
+                    _eprint(f"[session] ✓ cookie 未过期: {name}@{domain} (剩余 {int(remaining)}秒 ≈ {int(remaining/3600)}小时)")
+            else:
+                _eprint(f"[session] ⚠ session cookie (无固定过期): {name}@{domain}")
+
+        # 打印 SSO 相关 cookie 的信息
+        elif "xiaoshouyi" in domain.lower():
+            if expires > 0:
+                remaining = expires - now
+                status = "✓" if remaining > 0 else "❌"
+                _eprint(f"[session] {status} SSO cookie: {name}@{domain} (剩余 {int(remaining)}秒)")
+            else:
+                _eprint(f"[session] ⚠ SSO session cookie: {name}@{domain} (无固定过期)")
+
+    if not gerrit_cookies_found:
+        _eprint("[session] 未找到 Gerrit 相关 cookie")
+        return False
+
+    return True
+
+
 def _open_gerrit_session(cfg: Dict[str, Any]):
     sync_pw = _ensure_playwright()
     state = _state_path()
 
+    _eprint(f"[session] === 开始 Gerrit Session ===")
+    _eprint(f"[session] storage_state 路径: {state}")
+    _eprint(f"[session] storage_state 存在: {state.exists()}")
+
+    # 检查 cookie 有效性
+    cookies_valid = _check_session_cookies(state)
+    _eprint(f"[session] cookie 预检结果: {'可能有效' if cookies_valid else '无效/过期'}")
+
     pw = sync_pw().start()
     browser = pw.chromium.launch(headless=True)
     ctx_args: Dict[str, Any] = {}
-    if state.exists():
+
+    if state.exists() and cookies_valid:
         ctx_args["storage_state"] = str(state)
+        _eprint("[session] 使用已保存的 storage_state 创建 context")
+    else:
+        _eprint("[session] 不加载 storage_state（文件不存在或 cookie 已过期），将直接走登录流程")
+
     context = browser.new_context(**ctx_args)
     page = context.new_page()
 
-    page.goto(f"{GERRIT_BASE}/dashboard/self", wait_until="networkidle", timeout=30000)
+    target_url = f"{GERRIT_BASE}/dashboard/self"
+    _eprint(f"[session] 正在访问: {target_url}")
+    page.goto(target_url, wait_until="networkidle", timeout=30000)
+    _eprint(f"[session] 实际到达 URL: {page.url}")
 
     if _looks_like_login(page.url, cfg):
-        _eprint("需要登录，正在执行 SSO 登录...")
+        _eprint(f"[session] 检测到登录页面，session 恢复失败，开始 SSO 登录...")
+        _eprint(f"[session] 登录页 URL: {page.url}")
         _login(page, cfg)
-        page.goto(f"{GERRIT_BASE}/dashboard/self", wait_until="networkidle", timeout=30000)
+        _eprint(f"[session] 登录流程完成，当前 URL: {page.url}")
+
+        # 登录后再次跳转到 Gerrit dashboard
+        _eprint(f"[session] 登录后重新访问: {target_url}")
+        page.goto(target_url, wait_until="networkidle", timeout=30000)
+        _eprint(f"[session] 第二次跳转后 URL: {page.url}")
+    else:
+        _eprint("[session] ✓ session 恢复成功，未被重定向到登录页")
 
     if _looks_like_login(page.url, cfg):
+        _eprint(f"[session] ❌ 登录后仍在登录页: {page.url}")
+        # 打印当前页面 cookie 以便调试
+        cookies = context.cookies()
+        _eprint(f"[session] 当前 context 中的 cookie 数量: {len(cookies)}")
+        for c in cookies:
+            _eprint(f"[session]   {c['name']}@{c['domain']} = {c['value'][:20]}...")
         browser.close()
         pw.stop()
         raise RuntimeError("登录后仍在登录页，请检查 config/sso_config.json 中的账号密码")
@@ -184,6 +272,8 @@ def _open_gerrit_session(cfg: Dict[str, Any]):
     # 保存 state
     state.parent.mkdir(parents=True, exist_ok=True)
     context.storage_state(path=str(state))
+    _eprint(f"[session] ✓ storage_state 已保存到: {state}")
+    _eprint(f"[session] === Session 建立完成 ===")
 
     return pw, browser, context, page
 

@@ -5,62 +5,78 @@ description: Nova 任务管理技能。当用户提到"创建任务"、"添加�
 
 # Nova Tasks 管理
 
-通过结构化指令操作 Nova 客户端内置的任务系统。指令会被客户端自动解析和执行。
+通过直接读写 JSON 文件管理任务。Nova UI 通过文件监听自动同步展示。
 
-## 指令格式
+## 数据文件
 
-在回复中嵌入以下格式的指令（可以混在正常回复文本中）：
+**路径**: `~/.nova/data/tasks.json`
+
+**格式**: JSON 数组，每个元素为一个 Task 对象：
+
+```json
+[
+  {
+    "id": "task-1721555000000-a1b2",
+    "title": "任务标题",
+    "description": "任务描述（可选）",
+    "status": "pending",
+    "priority": "medium",
+    "startDate": "2026-07-21",
+    "dueDate": "2026-07-25",
+    "createdAt": "2026-07-21T10:30:00.000Z",
+    "updatedAt": "2026-07-21T10:30:00.000Z",
+    "completedAt": null
+  }
+]
+```
+
+## 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| id | string | ✅ | 格式: `task-{timestamp}-{random4chars}` |
+| title | string | ✅ | 任务标题 |
+| description | string | ❌ | 任务描述 |
+| status | string | ✅ | `pending` / `in_progress` / `completed` |
+| priority | string | ✅ | `low` / `medium` / `high` |
+| startDate | string | ✅ | 开始日期 YYYY-MM-DD，默认当天 |
+| dueDate | string | ❌ | 截止日期 YYYY-MM-DD |
+| createdAt | string | ✅ | ISO 时间戳 |
+| updatedAt | string | ✅ | ISO 时间戳，每次修改更新 |
+| completedAt | string | ❌ | 完成时间，status 变为 completed 时设置 |
+
+## 操作方式
+
+**所有操作通过 read/write tool 直接操作文件**：
+
+### 查看任务
+1. 使用 `read` tool 读取 `~/.nova/data/tasks.json`
+2. 在回复中以合适格式展示给用户
 
 ### 创建任务
+1. 读取现有文件内容
+2. 构造新 Task 对象，`unshift` 到数组头部
+3. 写回文件（保持 pretty print，2 空格缩进）
+
+### 更新/删除任务
+1. 读取文件
+2. 找到对应 id 的任务，修改或删除
+3. 更新 `updatedAt` 字段
+4. 写回文件
+
+## 行为规则
+
+1. 用户要求查看任务时 → 读取文件，在对话中展示任务列表
+2. 用户说"帮我记一下"、"TODO: xxx" 等格式时 → 直接创建任务写入文件
+3. 创建任务时 `startDate` 默认当天；`dueDate` 用户没说则根据复杂度推断（简单 1-2 天，中等 3-5 天，复杂 1-2 周）
+4. 文件不存在时创建新的空数组 `[]`
+5. 最多保留 200 条任务，超出时移除最旧的
+6. 写文件时使用 2 空格缩进的 JSON 格式
+
+## ID 生成规则
 
 ```
-[TASK:CREATE title="任务标题" priority="medium" startDate="2026-07-17" dueDate="2026-07-20"]
+task-{Date.now()}-{4位随机字母数字}
 ```
 
-- title: 必填，任务标题
-- priority: 可选，low / medium / high，默认 medium
-- description: 可选，任务描述
-- startDate: 可选，开始日期 (YYYY-MM-DD)，默认当天
-- dueDate: 可选，截止日期 (YYYY-MM-DD)。若用户未指定，根据任务复杂度自行推断合理的截止日期（简单任务 1-2 天，中等任务 3-5 天，复杂任务 1-2 周）
-
-### 更新任务状态
-
-```
-[TASK:STATUS id="task-xxx" status="completed"]
-```
-
-- id: 必填，任务 ID
-- status: pending / in_progress / completed
-
-### 更新任务内容
-
-```
-[TASK:UPDATE id="task-xxx" title="新标题" priority="high" dueDate="2026-07-25"]
-```
-
-- id: 必填
-- title / priority / description / startDate / dueDate: 要更新的字段
-
-### 删除任务
-
-```
-[TASK:DELETE id="task-xxx"]
-```
-
-### 列出任务
-
-```
-[TASK:LIST filter="all"]
-```
-
-- filter: all / active / completed，默认 all
-
-## 规则
-
-1. 当用户明确要求创建、修改、删除、查看任务/待办时，使用上述指令
-2. 指令可以出现在回复的任何位置，Nova 会自动提取执行
-3. 一次回复中可以包含多条指令
-4. 执行结果会自动展示给用户，你无需重复描述操作细节
-5. 如果用户只是提到计划但没有明确要求记录，先询问是否需要创建任务
-6. LIST 指令的结果会展示在 Tasks 面板，你在回复中简要说明即可
-7. 创建任务时，startDate 默认当天；dueDate 如果用户没说，根据任务难度自行推断一个合理的截止日
+示例: `task-1721555000000-x7kp`
