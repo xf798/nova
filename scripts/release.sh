@@ -110,6 +110,7 @@ LATEST_JSON="$BUNDLE_DIR/latest.json"
 info "生成 latest.json (platform=$PLATFORM)"
 SIGNATURE="$(cat "$APP_SIG")" \
 DL_URL="https://github.com/$RELEASE_REPO/releases/download/$TAG/$(basename "$APP_TARGZ")" \
+NOTES="$NOTES" \
 node -e "
   const fs=require('fs');
   const out={
@@ -124,7 +125,7 @@ node -e "
     },
   };
   fs.writeFileSync('$LATEST_JSON', JSON.stringify(out,null,2)+'\n');
-" NOTES="$NOTES"
+"
 
 echo "--- latest.json ---"
 cat "$LATEST_JSON"
