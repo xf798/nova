@@ -126,12 +126,18 @@ const CATEGORY_WEIGHTS: Record<MemoryCategory, number> = {
 /**
  * 对单条记忆打分
  *
- * 评分维度（各 0~1，加权汇总）：
- * 1. 关键词匹配（权重 0.45）— 用户输入分词 vs 记忆内容分词的交集比例
- * 2. 标签匹配（权重 0.25）— 用户输入分词 vs 记忆 tags 的交集
- * 3. 时效性（权重 0.10）— 越新分数越高，7天内满分，30天衰减到 0.3
- * 4. 分类加权（权重 0.10）— user_preference > feedback > project_context > workflow
- * 5. 路径匹配（权重 0.10）— project_context 类记忆如果 workspace 路径匹配则加分
+ * 结构：相关性做闸门，其余维度做乘性加成。
+ *
+ * 相关性（决定是否入选，零相关直接 0 分）：
+ * 1. 关键词匹配（占 0.7）— 用户输入分词 vs 记忆内容分词的交集比例
+ * 2. 标签匹配（占 0.3）— 用户输入分词 vs 记忆 tags 的交集
+ *
+ * 加成（只在相关项之间拉开差距，不构成保底分）：
+ * 3. 时效性 — 7天内满分，30天衰减到 0.3
+ * 4. 分类加权 — user_preference > feedback > project_context > workflow
+ * 5. 路径匹配 — project_context 类记忆如果 workspace 路径匹配则加分
+ *
+ * total = relevance * (0.75 + 0.25 * 加成均值)，因此 total <= relevance。
  */
 export function scoreMemory(
   memory: LongTermMemory,
@@ -188,12 +194,19 @@ export function scoreMemory(
   }
 
   // 加权汇总
-  const total =
-    keywordScore * 0.45 +
-    tagScore * 0.25 +
-    recencyScore * 0.10 +
-    catScore * 0.10 +
-    pathScore * 0.10;
+  //
+  // 相关性（关键词 + 标签）是闸门而非加分项：
+  // 早期用加法汇总，recency*0.10 + catScore*0.10 构成了与查询无关的保底分
+  // （7 天内的 feedback 类记忆保底 0.17 > 阈值 0.15），
+  // 导致任何查询都能让全部近期记忆「通过」，召回退化成「最近 N 条」。
+  //
+  // 现在：零相关直接 0 分；时效/分类/路径只在相关项之间做区分，
+  // 且以乘性加成参与，保证 total <= relevance。
+  const relevance = Math.min(1, keywordScore * 0.7 + tagScore * 0.3);
+  if (relevance <= 0) return 0;
+
+  const boost = (recencyScore + catScore + pathScore) / 3;
+  const total = relevance * (0.75 + 0.25 * boost);
 
   return Math.min(1, total);
 }
