@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicholasxjy/tauri-config-schema/main/schema.json",
   "productName": "Nova",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.nova.app",
   "build": {
     "frontendDist": "../dist",
@@ -10,7 +10,10 @@
     "beforeBuildCommand": "npm run build"
   },
   "bundle": {
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "createUpdaterArtifacts": true,
     "resources": [
       "resources/skills/**/*"
@@ -45,7 +48,11 @@
         "enable": true,
         "scope": {
           "requireLiteralLeadingDot": false,
-          "allow": ["$HOME/.nova/data/images/**/*", "$HOME/.nova/**/*", "/tmp/**/*"]
+          "allow": [
+            "$HOME/.nova/data/images/**/*",
+            "$HOME/.nova/**/*",
+            "/tmp/**/*"
+          ]
         }
       }
     }
