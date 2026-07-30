@@ -1,4 +1,4 @@
-# Pipeline Commander
+# Nova
 
 > PRD → 设计 → 代码 端到端自动化流水线控制客户端
 
@@ -46,7 +46,7 @@ npm run tauri build
 ## 项目结构
 
 ```
-pipeline-commander/
+nova/
 ├── src-tauri/           # Rust 后端
 │   ├── src/
 │   │   ├── main.rs      # 入口
