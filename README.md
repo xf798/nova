@@ -69,10 +69,3 @@ pipeline-commander/
 ├── tailwind.config.js
 └── tsconfig.json
 ```
-
-## 关联项目
-
-- [ai-pm-team](../ai-pm-team/) - PRD 产出
-- [ai-ux-team](../ai-ux-team/) - 设计产出
-- [ai-develop-team](../ai-develop-team/) - 代码生成
-- [schemas/](../schemas/) - PRD-IR + Handoff 协议定义
