@@ -1259,6 +1259,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
         .manage(Arc::new(WeComBot::new()))
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -1307,6 +1308,13 @@ pub fn run() {
             coding_tools::tool_grep,
         ])
         .setup(|app| {
+            // updater 插件仅在桌面平台可用（Cargo.toml 中已按 target 限定依赖）
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
+
             // 确保数据目录存在
             let dir = data_dir();
             let _ = std::fs::create_dir_all(&dir);

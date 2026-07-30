@@ -6,6 +6,7 @@ import { loadSkills } from "../core/skills";
 import { registerCodingTools } from "../core/tools/coding";
 import { scheduler } from "../core/scheduler";
 import { registerDistillJob, ensureDefaultDistillJobs } from "../core/distill";
+import { checkOnly, getAutoCheckEnabled } from "../core/updater";
 import { useSessionStore } from "../core/sessionStore";
 import type { ChatSession } from "../core/types";
 
@@ -143,6 +144,25 @@ export function useNovaInit({ activeConnectorId, setHasFullDiskAccess }: UseNova
           console.log("[Nova:Init] ⚠️ 未获得完全磁盘访问权限");
         }
       } catch {}
+
+      // 启动时静默检查更新（仅提示，不自动安装）
+      // 延迟执行避免与初始化争抢网络/CPU；dev 模式下 updater 不可用会静默失败
+      setTimeout(async () => {
+        try {
+          if (!(await getAutoCheckEnabled())) return;
+          const st = await checkOnly();
+          if (st.stage === "available") {
+            window.dispatchEvent(new CustomEvent("nova-notify", {
+              detail: { msg: `发现新版本 v${st.newVersion}，可在 设置 → 关于与更新 中安装`, type: "info" },
+            }));
+            dbg(`[Init] 发现新版本: ${st.newVersion}`);
+          } else {
+            dbg(`[Init] 更新检查: ${st.stage}`);
+          }
+        } catch (e) {
+          console.warn("[Init] 更新检查失败:", e);
+        }
+      }, 5000);
 
       dbg(`[Init] ═══ Nova 前端初始化完成 ═══ 总耗时: ${(performance.now() - t0).toFixed(0)}ms`);
     };
