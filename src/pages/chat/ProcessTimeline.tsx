@@ -249,6 +249,34 @@ export function groupTimeline(events: TimelineEvent[]): RenderUnit[] {
   return units;
 }
 
+/**
+ * 判断当前是否有「正在进行」的过程单元。
+ *
+ * 用于决定要不要在时间线末尾补等待指示：工具完成到下一段文本到达之间
+ * 存在空隙，若此时没有任何转圈，界面看起来像卡住了。
+ */
+export function hasActiveWork(events: TimelineEvent[]): boolean {
+  for (const e of events) {
+    if (e.kind === "tool" && (e.status === "in_progress" || e.status === "pending")) return true;
+  }
+  // 最后一个事件是尚未封段的思考 → 思考进行中
+  const last = events[events.length - 1];
+  if (last && last.kind === "thought" && !last.endedAt) return true;
+  return false;
+}
+
+/** 尾部等待指示：流式中但无进行中单元时显示，避免看起来卡住 */
+function PendingRow() {
+  return (
+    <div className="my-1 ml-2 flex items-center gap-2 text-[12px] text-app-text-muted">
+      <div className="flex-shrink-0 flex items-center">
+        <SpinnerIcon />
+      </div>
+      <span className="animate-pulse">Thinking</span>
+    </div>
+  );
+}
+
 function ProcessTimeline({
   events,
   isStreaming,
@@ -258,6 +286,8 @@ function ProcessTimeline({
 }) {
   const lastIndex = events.length - 1;
   const units = groupTimeline(events);
+  // 流式中若没有任何进行中的单元，说明处于事件间隙，补一个等待指示
+  const showPending = isStreaming && !hasActiveWork(events);
 
   return (
     <>
@@ -293,6 +323,7 @@ function ProcessTimeline({
         const active = isStreaming && index === lastIndex && !(event as TimelineThoughtEvent).endedAt;
         return <ThoughtSegment key={key} event={event as TimelineThoughtEvent} isActive={active} />;
       })}
+      {showPending && <PendingRow />}
     </>
   );
 }

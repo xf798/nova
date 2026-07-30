@@ -144,17 +144,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
         {/* 召回明细：请求发出前注入了哪些记忆/技能，位于过程之前 */}
         {message.recall && <RecallBlock recall={message.recall} />}
 
-        {/* 流式刚开始、还没有任何过程事件时的等待指示 */}
-        {isStreaming && timelineEvents.length === 0 && (
-          <div className="mb-2 ml-2 flex items-center gap-2 text-[12px] text-app-text-muted">
-            <div className="flex-shrink-0 flex items-center">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-gray-400" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-            </div>
-            <span className="animate-pulse">Thinking</span>
-          </div>
-        )}
-
-        {/* 过程与正文按真实顺序内联渲染 */}
+        {/* 过程与正文按真实顺序内联渲染；等待指示由 ProcessTimeline 统一处理 */}
         <ProcessTimeline events={timelineEvents} isStreaming={isStreaming} />
 
         {message.attachments && message.attachments.length > 0 && (

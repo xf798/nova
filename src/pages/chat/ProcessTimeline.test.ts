@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatDuration, cleanToolTitle, groupTimeline } from "./ProcessTimeline";
+import { formatDuration, cleanToolTitle, groupTimeline, hasActiveWork } from "./ProcessTimeline";
 import type { TimelineEvent, TimelineToolEvent } from "../../connectors";
 
 const tool = (id: string, title = "Read", status: TimelineToolEvent["status"] = "completed"): TimelineToolEvent => ({
@@ -113,5 +113,46 @@ describe("groupTimeline — 连续工具归组", () => {
     const units = groupTimeline(many);
     expect(units.length).toBe(1);
     expect((units[0] as any).events.length).toBe(14);
+  });
+});
+
+describe("hasActiveWork — 决定是否补尾部等待指示", () => {
+  const runningTool = (id: string): TimelineToolEvent => ({
+    kind: "tool", toolCallId: id, title: "Read", toolKind: "read",
+    status: "in_progress", at: 100,
+  });
+  const openThought = (): TimelineEvent => ({ kind: "thought", text: "想…", at: 1 });
+  const closedThought = (): TimelineEvent => ({ kind: "thought", text: "想过了", at: 1, endedAt: 2 });
+
+  it("有工具在跑时视为进行中，不补指示", () => {
+    expect(hasActiveWork([text("先看看"), runningTool("a")])).toBe(true);
+  });
+
+  it("pending 状态的工具也算进行中", () => {
+    expect(hasActiveWork([{ ...runningTool("a"), status: "pending" }])).toBe(true);
+  });
+
+  it("最后是未封段的思考时视为进行中", () => {
+    expect(hasActiveWork([text("正文"), openThought()])).toBe(true);
+  });
+
+  it("已封段的思考不算进行中", () => {
+    expect(hasActiveWork([closedThought()])).toBe(false);
+  });
+
+  it("工具已完成、后续内容未到 → 需要补指示（此前会看起来卡住）", () => {
+    expect(hasActiveWork([text("说明"), tool("a", "Editing Settings.tsx")])).toBe(false);
+  });
+
+  it("最后是正文片段时也需要补指示（仍在生成）", () => {
+    expect(hasActiveWork([tool("a"), text("正在写…")])).toBe(false);
+  });
+
+  it("空时间线需要补指示（刚开始，尚无任何事件）", () => {
+    expect(hasActiveWork([])).toBe(false);
+  });
+
+  it("中间有已完成工具但末尾有在跑的工具 → 进行中", () => {
+    expect(hasActiveWork([tool("a"), text("中间"), runningTool("b")])).toBe(true);
   });
 });
