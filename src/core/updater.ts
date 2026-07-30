@@ -6,9 +6,14 @@
 // - 更新包由 tauri build 生成（createUpdaterArtifacts: true），并用 minisign
 //   私钥签名，客户端用 tauri.conf.json 里的 pubkey 校验，签名不通过则拒绝安装
 //
+// 状态放在模块级 store 而非组件内：
+// 下载可能持续数十秒，用户中途离开设置页会导致组件卸载。若状态在组件里，
+// 回调就写进了已销毁的 state，回到设置页只能从头下载。
+//
 // 注意：dev 模式下 updater 不可用（没有打包产物），check() 会直接报错，
 // 因此所有入口都要容忍失败。
 
+import { create } from "zustand";
 import { StorageService } from "./storage";
 
 /** 更新流程状态 */
@@ -21,7 +26,7 @@ export type UpdateStage =
   | "readyToRestart"
   | "error";
 
-export interface UpdateState {
+interface UpdateStoreState {
   stage: UpdateStage;
   /** 当前已安装版本 */
   currentVersion?: string;
@@ -33,12 +38,28 @@ export interface UpdateState {
   progress?: number;
   /** 错误信息 */
   error?: string;
+  /** 上次检查完成时间戳，用于避免频繁重复检查 */
+  lastCheckedAt?: number;
 }
 
 const STORAGE_NS = "updater";
 const KEY_AUTO_CHECK = "autoCheckOnStartup";
 
+/** 同一结果在此时间窗内不重复检查 */
+const CHECK_TTL_MS = 5 * 60 * 1000;
+
 const storage = StorageService.getInstance();
+
+export const useUpdateStore = create<UpdateStoreState>(() => ({
+  stage: "idle",
+}));
+
+/** 下载/安装是否正在进行，防止重复触发 */
+let installing = false;
+/** 检查是否正在进行，防止并发检查 */
+let checking = false;
+
+// ─── 设置项 ───
 
 /** 读取「启动时自动检查更新」开关（默认开启） */
 export async function getAutoCheckEnabled(): Promise<boolean> {
@@ -59,6 +80,8 @@ export async function setAutoCheckEnabled(enabled: boolean): Promise<void> {
   }
 }
 
+// ─── 版本 ───
+
 /** 获取当前应用版本 */
 export async function getCurrentVersion(): Promise<string | undefined> {
   try {
@@ -70,95 +93,131 @@ export async function getCurrentVersion(): Promise<string | undefined> {
   }
 }
 
-/**
- * 检查是否有更新。
- * @returns 有更新时返回 Update 对象，无更新返回 null；出错抛异常
- */
-async function checkUpdate() {
+/** 把当前版本号填入 store（供 UI 首次渲染显示） */
+export async function primeCurrentVersion(): Promise<void> {
+  if (useUpdateStore.getState().currentVersion) return;
+  const v = await getCurrentVersion();
+  if (v) useUpdateStore.setState({ currentVersion: v });
+}
+
+// ─── 检查 ───
+
+async function rawCheck() {
   const { check } = await import("@tauri-apps/plugin-updater");
   return await check();
 }
 
 /**
- * 仅检查更新，不下载。用于启动时静默探测。
- * 失败时返回 error 态而非抛出，避免影响启动流程。
+ * 检查更新并写入 store。
+ *
+ * @param force 为 false 时，若已在 TTL 内检查过则跳过（用于进入设置页的自动检查）
  */
-export async function checkOnly(): Promise<UpdateState> {
-  const currentVersion = await getCurrentVersion();
+export async function checkForUpdate(force = true): Promise<void> {
+  const s = useUpdateStore.getState();
+
+  // 下载中或已就绪时不该被检查打断
+  if (installing || s.stage === "downloading" || s.stage === "readyToRestart") return;
+  if (checking) return;
+
+  if (!force && s.lastCheckedAt && Date.now() - s.lastCheckedAt < CHECK_TTL_MS) {
+    // 已有较新结果，直接沿用
+    return;
+  }
+
+  checking = true;
+  const currentVersion = s.currentVersion || (await getCurrentVersion());
+  useUpdateStore.setState({ stage: "checking", currentVersion, error: undefined });
+
   try {
-    const update = await checkUpdate();
+    const update = await rawCheck();
     if (!update) {
-      return { stage: "upToDate", currentVersion };
+      useUpdateStore.setState({
+        stage: "upToDate",
+        currentVersion,
+        newVersion: undefined,
+        notes: undefined,
+        lastCheckedAt: Date.now(),
+      });
+      return;
     }
-    return {
+    useUpdateStore.setState({
       stage: "available",
       currentVersion: update.currentVersion || currentVersion,
       newVersion: update.version,
       notes: update.body || undefined,
-    };
+      lastCheckedAt: Date.now(),
+    });
   } catch (e: any) {
     const msg = e?.message || String(e);
     console.warn("[Updater] 检查更新失败:", msg);
-    return { stage: "error", currentVersion, error: msg };
+    useUpdateStore.setState({
+      stage: "error",
+      currentVersion,
+      error: msg,
+      lastCheckedAt: Date.now(),
+    });
+  } finally {
+    checking = false;
   }
 }
 
+// ─── 下载安装 ───
+
 /**
- * 检查 → 下载 → 安装，全程回调进度。
- * 安装完成后需调用 restartApp() 生效。
+ * 下载并安装更新。进度写入 store，因此中途离开设置页不影响下载。
+ * 重复调用会被忽略。
  */
-export async function downloadAndInstall(
-  onState: (s: UpdateState) => void,
-): Promise<void> {
-  const currentVersion = await getCurrentVersion();
-  onState({ stage: "checking", currentVersion });
+export async function downloadAndInstall(): Promise<void> {
+  if (installing) return;
+  const s = useUpdateStore.getState();
+  if (s.stage === "downloading" || s.stage === "readyToRestart") return;
 
-  let update: Awaited<ReturnType<typeof checkUpdate>>;
+  installing = true;
   try {
-    update = await checkUpdate();
-  } catch (e: any) {
-    onState({ stage: "error", currentVersion, error: e?.message || String(e) });
-    return;
-  }
+    // 重新 check 拿到 Update 实例（Update 对象不便长期持有）
+    const update = await rawCheck();
+    if (!update) {
+      useUpdateStore.setState({ stage: "upToDate", lastCheckedAt: Date.now() });
+      return;
+    }
 
-  if (!update) {
-    onState({ stage: "upToDate", currentVersion });
-    return;
-  }
+    useUpdateStore.setState({
+      stage: "downloading",
+      currentVersion: update.currentVersion || s.currentVersion,
+      newVersion: update.version,
+      notes: update.body || s.notes,
+      progress: 0,
+      error: undefined,
+    });
 
-  const base: UpdateState = {
-    stage: "downloading",
-    currentVersion: update.currentVersion || currentVersion,
-    newVersion: update.version,
-    notes: update.body || undefined,
-  };
-  onState({ ...base, progress: 0 });
+    let downloaded = 0;
+    let contentLength = 0;
 
-  let downloaded = 0;
-  let contentLength = 0;
-
-  try {
     await update.downloadAndInstall(event => {
       switch (event.event) {
         case "Started":
           contentLength = event.data.contentLength || 0;
-          onState({ ...base, progress: 0 });
+          useUpdateStore.setState({ progress: 0 });
           break;
         case "Progress":
           downloaded += event.data.chunkLength || 0;
-          onState({
-            ...base,
+          useUpdateStore.setState({
             progress: contentLength > 0 ? downloaded / contentLength : undefined,
           });
           break;
         case "Finished":
-          onState({ ...base, progress: 1 });
+          useUpdateStore.setState({ progress: 1 });
           break;
       }
     });
-    onState({ ...base, stage: "readyToRestart", progress: 1 });
+
+    useUpdateStore.setState({ stage: "readyToRestart", progress: 1 });
   } catch (e: any) {
-    onState({ ...base, stage: "error", error: e?.message || String(e) });
+    const msg = e?.message || String(e);
+    console.warn("[Updater] 下载安装失败:", msg);
+    useUpdateStore.setState({ stage: "error", error: msg });
+  } finally {
+    installing = false;
   }
 }
 

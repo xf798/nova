@@ -15,14 +15,14 @@ import type { ReviewItem } from "../core/distill";
 import { scheduler } from "../core/scheduler";
 import type { ScheduledJob } from "../core/scheduler";
 import {
-  checkOnly,
+  useUpdateStore,
+  checkForUpdate,
   downloadAndInstall,
   restartApp,
-  getCurrentVersion,
+  primeCurrentVersion,
   getAutoCheckEnabled,
   setAutoCheckEnabled,
 } from "../core/updater";
-import type { UpdateState } from "../core/updater";
 import type { DistillConfig } from "../core/distill";
 import { DEFAULT_DISTILL_CONFIG } from "../core/distill";
 
@@ -857,50 +857,77 @@ function TimeField({ value, onCommit }: { value: string; onCommit: (v: string) =
   );
 }
 
-/** 关于与更新：显示当前版本、手动检查更新、下载安装、重启 */
+/** 关于与更新：版本、自动检查开关、检查/下载/重启 */
 function UpdateSettings() {
-  const [version, setVersion] = useState<string>("—");
   const [autoCheck, setAutoCheck] = useState(true);
-  const [state, setState] = useState<UpdateState>({ stage: "idle" });
+  // 状态取自模块级 store，离开设置页不中断下载
+  const stage = useUpdateStore(s => s.stage);
+  const currentVersion = useUpdateStore(s => s.currentVersion);
+  const newVersion = useUpdateStore(s => s.newVersion);
+  const notes = useUpdateStore(s => s.notes);
+  const progress = useUpdateStore(s => s.progress);
+  const error = useUpdateStore(s => s.error);
 
   useEffect(() => {
-    getCurrentVersion().then(v => setVersion(v || "—"));
+    primeCurrentVersion();
     getAutoCheckEnabled().then(setAutoCheck);
+    // 进入设置页即自动检查（TTL 内已检查过则沿用结果，不重复请求）
+    checkForUpdate(false);
   }, []);
 
-  const busy = state.stage === "checking" || state.stage === "downloading";
-
-  const handleCheck = async () => {
-    setState({ stage: "checking" });
-    const s = await checkOnly();
-    setState(s);
-  };
-
-  const handleInstall = async () => {
-    await downloadAndInstall(setState);
-  };
+  const busy = stage === "checking" || stage === "downloading";
+  const pct = progress !== undefined ? Math.round(progress * 100) : undefined;
 
   const toggleAuto = async (v: boolean) => {
     setAutoCheck(v);
     await setAutoCheckEnabled(v);
   };
 
-  const pct = state.progress !== undefined ? Math.round(state.progress * 100) : undefined;
+  // 检查行左侧文案
+  const statusText = (() => {
+    switch (stage) {
+      case "checking": return "正在检查更新…";
+      case "upToDate": return "已是最新版本";
+      case "available": return `发现新版本 v${newVersion}`;
+      case "downloading": return `正在下载 v${newVersion}`;
+      case "readyToRestart": return `v${newVersion} 已就绪`;
+      case "error": return "检查更新失败";
+      default: return "检查更新";
+    }
+  })();
+
+  const statusHint = (() => {
+    if (stage === "available" || stage === "downloading") return notes;
+    if (stage === "readyToRestart") return "重启后生效";
+    if (stage === "error") return error;
+    return undefined;
+  })();
+
+  // 检查行右侧按钮
+  const action = (() => {
+    if (stage === "available" || (stage === "error" && newVersion)) {
+      return { label: "下载并安装", onClick: downloadAndInstall, primary: true };
+    }
+    if (stage === "downloading") {
+      return { label: `下载中 ${pct ?? 0}%`, onClick: undefined, primary: true };
+    }
+    if (stage === "readyToRestart") {
+      return { label: "重启以完成", onClick: restartApp, primary: true };
+    }
+    return {
+      label: stage === "checking" ? "检查中…" : "检查更新",
+      onClick: () => checkForUpdate(true),
+      primary: false,
+    };
+  })();
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[13px] text-app-text">当前版本</p>
-          <p className="text-[11px] text-app-text-muted">Nova v{version}</p>
+          <p className="text-[11px] text-app-text-muted">Nova v{currentVersion || "—"}</p>
         </div>
-        <button
-          onClick={handleCheck}
-          disabled={busy}
-          className="px-4 py-1.5 rounded-full text-[12px] font-medium border border-app-border text-app-text-secondary hover:border-app-text-muted hover:text-app-text transition-colors disabled:opacity-50"
-        >
-          {state.stage === "checking" ? "检查中…" : "检查更新"}
-        </button>
       </div>
 
       <div className="flex items-center justify-between">
@@ -910,72 +937,58 @@ function UpdateSettings() {
         </div>
         <button
           onClick={() => toggleAuto(!autoCheck)}
-          className={`relative w-9 h-5 rounded-full transition-colors ${autoCheck ? "bg-[#10a37f]" : "bg-app-border"}`}
+          className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${autoCheck ? "bg-[#10a37f]" : "bg-app-border"}`}
         >
           <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${autoCheck ? "left-[18px]" : "left-0.5"}`}></span>
         </button>
       </div>
 
-      {/* 状态区 */}
-      {state.stage === "upToDate" && (
-        <p className="text-[12px] text-app-text-muted">已是最新版本。</p>
-      )}
-
-      {(state.stage === "available" || state.stage === "downloading" || state.stage === "readyToRestart") && (
-        <div className="rounded-lg border border-app-border bg-app-bg p-3 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-[13px] text-app-text">
-                发现新版本 v{state.newVersion}
+      {/* 检查/下载行：操作按钮就在本行，进度条紧随其下，无需滚动寻找 */}
+      <div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className={`text-[13px] ${stage === "available" || stage === "readyToRestart" ? "text-[#10a37f]" : "text-app-text"}`}>
+              {statusText}
+            </p>
+            {statusHint && (
+              <p className={`text-[11px] mt-0.5 whitespace-pre-wrap ${stage === "error" ? "text-red-500" : "text-app-text-muted"}`}>
+                {statusHint}
               </p>
-              {state.notes && (
-                <p className="text-[11px] text-app-text-muted whitespace-pre-wrap mt-0.5">{state.notes}</p>
-              )}
-            </div>
-            {state.stage === "available" && (
-              <button
-                onClick={handleInstall}
-                className="shrink-0 px-4 py-1.5 rounded-full text-[12px] font-medium border border-[#10a37f] bg-[#10a37f]/10 text-[#10a37f] hover:bg-[#10a37f]/20 transition-colors"
-              >
-                下载并安装
-              </button>
-            )}
-            {state.stage === "readyToRestart" && (
-              <button
-                onClick={restartApp}
-                className="shrink-0 px-4 py-1.5 rounded-full text-[12px] font-medium border border-[#10a37f] bg-[#10a37f]/10 text-[#10a37f] hover:bg-[#10a37f]/20 transition-colors"
-              >
-                重启以完成
-              </button>
             )}
           </div>
-
-          {state.stage === "downloading" && (
-            <div className="space-y-1">
-              <div className="h-1 rounded-full bg-app-border overflow-hidden">
-                <div
-                  className="h-full bg-[#10a37f] transition-all"
-                  style={{ width: pct !== undefined ? `${pct}%` : "40%" }}
-                ></div>
-              </div>
-              <p className="text-[11px] text-app-text-muted">
-                {pct !== undefined ? `下载中 ${pct}%` : "下载中…"}
-              </p>
-            </div>
-          )}
-
-          {state.stage === "readyToRestart" && (
-            <p className="text-[11px] text-app-text-muted">更新已安装，重启后生效。</p>
-          )}
+          <button
+            onClick={action.onClick}
+            disabled={busy || !action.onClick}
+            className={`shrink-0 px-4 py-1.5 rounded-full text-[12px] font-medium transition-colors disabled:opacity-60 ${
+              action.primary
+                ? "border border-[#10a37f] bg-[#10a37f]/10 text-[#10a37f] hover:bg-[#10a37f]/20"
+                : "border border-app-border text-app-text-secondary hover:border-app-text-muted hover:text-app-text"
+            }`}
+          >
+            {action.label}
+          </button>
         </div>
-      )}
 
-      {state.stage === "error" && (
-        <p className="text-[11px] text-red-500 whitespace-pre-wrap">
-          检查更新失败：{state.error}
-          {"\n"}（开发模式下 updater 不可用，需在打包后的应用中测试）
-        </p>
-      )}
+        {stage === "downloading" && (
+          <div className="mt-2 space-y-1">
+            <div className="h-1 rounded-full bg-app-border overflow-hidden">
+              <div
+                className="h-full bg-[#10a37f] transition-all"
+                style={{ width: pct !== undefined ? `${pct}%` : "40%" }}
+              ></div>
+            </div>
+            <p className="text-[11px] text-app-text-muted">
+              {pct !== undefined ? `已下载 ${pct}%` : "下载中…"}
+            </p>
+          </div>
+        )}
+
+        {stage === "error" && !newVersion && (
+          <p className="mt-1 text-[11px] text-app-text-muted">
+            开发模式下 updater 不可用，需在打包后的应用中测试。
+          </p>
+        )}
+      </div>
     </div>
   );
 }

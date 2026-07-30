@@ -6,7 +6,7 @@ import { loadSkills } from "../core/skills";
 import { registerCodingTools } from "../core/tools/coding";
 import { scheduler } from "../core/scheduler";
 import { registerDistillJob, ensureDefaultDistillJobs } from "../core/distill";
-import { checkOnly, getAutoCheckEnabled } from "../core/updater";
+import { useUpdateStore, checkForUpdate, getAutoCheckEnabled, primeCurrentVersion } from "../core/updater";
 import { useSessionStore } from "../core/sessionStore";
 import type { ChatSession } from "../core/types";
 
@@ -146,11 +146,14 @@ export function useNovaInit({ activeConnectorId, setHasFullDiskAccess }: UseNova
       } catch {}
 
       // 启动时静默检查更新（仅提示，不自动安装）
+      // 结果写入 updater store，进入设置页时可直接复用，无需重复请求
       // 延迟执行避免与初始化争抢网络/CPU；dev 模式下 updater 不可用会静默失败
       setTimeout(async () => {
         try {
+          await primeCurrentVersion();
           if (!(await getAutoCheckEnabled())) return;
-          const st = await checkOnly();
+          await checkForUpdate(true);
+          const st = useUpdateStore.getState();
           if (st.stage === "available") {
             window.dispatchEvent(new CustomEvent("nova-notify", {
               detail: { msg: `发现新版本 v${st.newVersion}，可在 设置 → 关于与更新 中安装`, type: "info" },
