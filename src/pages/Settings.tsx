@@ -883,21 +883,23 @@ function UpdateSettings() {
     await setAutoCheckEnabled(v);
   };
 
-  // 检查行左侧文案
+  // 检查行左侧文案：版本号并入其中，不再独占一行
+  const ver = currentVersion || "—";
   const statusText = (() => {
     switch (stage) {
       case "checking": return "正在检查更新…";
-      case "upToDate": return "已是最新版本";
+      case "upToDate": return `已是最新版本 · v${ver}`;
       case "available": return `发现新版本 v${newVersion}`;
       case "downloading": return `正在下载 v${newVersion}`;
       case "readyToRestart": return `v${newVersion} 已就绪`;
       case "error": return "检查更新失败";
-      default: return "检查更新";
+      default: return `当前版本 v${ver}`;
     }
   })();
 
   const statusHint = (() => {
-    if (stage === "available" || stage === "downloading") return notes;
+    if (stage === "available") return `当前 v${ver}${notes ? " · " + notes : ""}`;
+    if (stage === "downloading") return notes;
     if (stage === "readyToRestart") return "重启后生效";
     if (stage === "error") return error;
     return undefined;
@@ -923,13 +925,6 @@ function UpdateSettings() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-[13px] text-app-text">当前版本</p>
-          <p className="text-[11px] text-app-text-muted">Nova v{currentVersion || "—"}</p>
-        </div>
-      </div>
-
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[13px] text-app-text">启动时自动检查更新</p>
