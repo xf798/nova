@@ -6,12 +6,11 @@ const now = new Date().toISOString();
 
 function mem(partial: Partial<LongTermMemory> & { content: string }): LongTermMemory {
   return {
-    id: partial.id ?? Math.random().toString(36).slice(2),
-    content: partial.content,
-    category: partial.category ?? "feedback",
-    tags: partial.tags ?? [],
-    createdAt: partial.createdAt ?? now,
-    updatedAt: partial.updatedAt ?? now,
+    id: Math.random().toString(36).slice(2),
+    category: "feedback",
+    tags: [],
+    createdAt: now,
+    updatedAt: now,
     ...partial,
   } as LongTermMemory;
 }
