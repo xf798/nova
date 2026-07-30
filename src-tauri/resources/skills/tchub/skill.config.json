@@ -1,0 +1,14 @@
+{
+  "id": "tchub",
+  "name": "TCHub",
+  "settings": [
+    {
+      "key": "tchub_token",
+      "label": "TCHub Token",
+      "type": "password",
+      "placeholder": "tch_...",
+      "description": "用于连接 TCHub API，优先读取环境变量 TCH_API_TOKEN",
+      "env": "TCH_API_TOKEN"
+    }
+  ]
+}

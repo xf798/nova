@@ -1,0 +1,49 @@
+# ─── 依赖 ───
+node_modules/
+.pnpm-store/
+
+# ─── 构建产物 ───
+dist/
+dist-ssr/
+build/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ─── 凭据 / 密钥（绝不提交）───
+# skill 真实配置只在 ~/.nova/skills/ 下，仓库内只保留 *.example.json
+src-tauri/resources/skills/**/config/*.json
+!src-tauri/resources/skills/**/config/*.example.json
+# Playwright / 浏览器登录态（运行时生成）
+**/storage_state.json
+**/*_storage_state.json
+# Tauri updater 签名私钥
+*.key
+*.pem
+**/tauri-signing-key*
+
+# ─── 环境变量 ───
+.env
+.env.*
+!.env.example
+
+# ─── 编辑器 / 系统 ───
+.DS_Store
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+
+# ─── 日志 / 临时 ───
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.cache/
+*.tsbuildinfo
+
+# ─── Python（skill 脚本用到的虚拟环境）───
+.venv/
+__pycache__/
+*.py[cod]

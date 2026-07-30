@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NexusChat</title>
+    <script>
+      window.addEventListener('error', function(e) {
+        var d = document.createElement('div');
+        d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:red;color:white;padding:10px;font-size:14px;font-family:monospace;white-space:pre-wrap;';
+        d.textContent = 'JS ERROR: ' + (e.message || 'unknown') + '\n' + (e.filename||'') + ':' + (e.lineno||'');
+        document.body.appendChild(d);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var d = document.createElement('div');
+        d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:darkred;color:white;padding:10px;font-size:14px;font-family:monospace;white-space:pre-wrap;';
+        d.textContent = 'PROMISE REJECT: ' + (e.reason && e.reason.message || e.reason || 'unknown');
+        document.body.appendChild(d);
+      });
+      // 3秒后检查 React 是否挂载，通过 IPC 发到后端
+      setTimeout(function() {
+        var root = document.getElementById('root');
+        var hasChildren = root && root.children.length > 0;
+        var tauriOk = !!window.__TAURI_INTERNALS__;
+        var msg = 'DOM_CHECK: root_has_children=' + hasChildren + ', tauri_internals=' + tauriOk + ', root_innerHTML_len=' + (root ? root.innerHTML.length : -1);
+        document.title = msg;
+        // 尝试通过 IPC 发到后端
+        if (window.__TAURI_INTERNALS__) {
+          window.__TAURI_INTERNALS__.invoke('debug_log', { msg: msg });
+        }
+      }, 3000);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

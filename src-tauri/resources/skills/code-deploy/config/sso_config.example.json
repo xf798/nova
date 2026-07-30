@@ -1,0 +1,35 @@
+{
+  "_comment": "首次使用请填写 username / password / company，其余选择器配置一般无需修改",
+  "login_url_contains": "login.xiaoshouyi.com/auc/",
+  "password_login_url": "",
+  "auto_click_sso_entry": true,
+  "sso_entry_href_contains": "login.xiaoshouyi.com",
+  "sso_entry_text": "Log In",
+  "sso_entry_selector": null,
+  "username": "",
+  "password": "",
+  "company": "",
+  "company_click_text": null,
+  "company_selector": null,
+  "company_submit_selector": null,
+  "username_selector": "input[data-ta-key='email_input'], input[name='username']",
+  "password_selector": "input[data-ta-key='password_input'], input[type='password']",
+  "submit_selector": "button[data-ta-key='login_btn']",
+  "sso_entry_text_fallbacks": [
+    "Log In",
+    "登录",
+    "SSO",
+    "密码登录"
+  ],
+  "account_placeholders": [
+    "手机号/邮箱",
+    "手机号",
+    "邮箱"
+  ],
+  "password_placeholders": [
+    "密码"
+  ],
+  "login_button_text": "登 录",
+  "post_submit_timeout_ms": 30000,
+  "post_company_timeout_ms": 30000
+}

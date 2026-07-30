@@ -1,0 +1,57 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasxjy/tauri-config-schema/main/schema.json",
+  "productName": "Nova",
+  "version": "0.1.0",
+  "identifier": "com.nova.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "bundle": {
+    "targets": "all",
+    "resources": [
+      "resources/skills/**/*"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ]
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nova",
+        "width": 1100,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false
+    },
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "requireLiteralLeadingDot": false,
+          "allow": ["$HOME/.nova/data/images/**/*", "$HOME/.nova/**/*", "/tmp/**/*"]
+        }
+      }
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

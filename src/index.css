@@ -1,0 +1,441 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== 主题变量（参考 ChatGPT 风格） ===== */
+:root, .dark {
+  --app-bg: #212121;
+  --app-surface: #171717;
+  --app-surface-hover: #2f2f2f;
+  --app-border: #3b3b3b;
+  --app-text: #ececec;
+  --app-text-secondary: #b4b4b4;
+  --app-text-muted: #7a7a7a;
+  --app-input-bg: #2f2f2f;
+  --app-input-border: #4a4a4a;
+  --app-msg-user-bg: #2f2f2f;
+  --app-msg-assistant-bg: transparent;
+  --code-bg: #1e1e1e;
+  --code-block-bg: #1e1e1e;
+}
+
+.light {
+  --app-bg: #ffffff;
+  --app-surface: #f3f3f3;
+  --app-surface-hover: #e8e8e8;
+  --app-border: #e0e0e0;
+  --app-text: #0d0d0d;
+  --app-text-secondary: #4a4a4a;
+  --app-text-muted: #8e8e8e;
+  --app-input-bg: #ffffff;
+  --app-input-border: #e0e0e0;
+  --app-msg-user-bg: #f4f4f4;
+  --app-msg-assistant-bg: transparent;
+  --code-bg: #f7f7f8;
+  --code-block-bg: #f7f7f8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  letter-spacing: -0.003em;
+  background: var(--app-bg);
+  color: var(--app-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 亮色模式用 auto 让字体更圆润 */
+.light body,
+.light {
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
+
+/* ===== 语义化工具类 ===== */
+.bg-app-bg { background-color: var(--app-bg); }
+.bg-app-surface { background-color: var(--app-surface); }
+.bg-app-surface-hover { background-color: var(--app-surface-hover); }
+.hover\:bg-app-surface-hover:hover { background-color: var(--app-surface-hover); }
+.border-app-border { border-color: var(--app-border); }
+.bg-app-text { background-color: var(--app-text); }
+.disabled\:bg-app-border:disabled { background-color: var(--app-border); }
+.text-app-bg { color: var(--app-bg); }
+.text-app-text { color: var(--app-text); }
+.text-app-text-secondary { color: var(--app-text-secondary); }
+.text-app-text-muted { color: var(--app-text-muted); }
+.hover\:text-app-text:hover { color: var(--app-text); }
+.hover\:text-app-text-secondary:hover { color: var(--app-text-secondary); }
+
+/* ===== 通用输入框 ===== */
+.input-field {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  border-radius: 0.75rem;
+  border: 1px solid var(--app-input-border);
+  background-color: var(--app-input-bg);
+  color: var(--app-text);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-field:focus {
+  outline: none;
+  border-color: #10a37f;
+  box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.1);
+}
+.input-field::placeholder {
+  color: var(--app-text-muted);
+}
+
+/* ===== 滚动条（与 ChatGPT 类似，极细） ===== */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--app-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--app-text-muted);
+}
+
+/* ===== 光标闪烁动画 ===== */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ===== 呼吸闪烁动画 ===== */
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.92); }
+}
+
+/* ===== 旋转动画 ===== */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ===== 工具调用淡入动画 ===== */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== 工具调用省略号动画 ===== */
+.tool-call-dots {
+  display: inline-block;
+  animation: toolDots 1.4s steps(4, end) infinite;
+  width: 1.2em;
+  text-align: left;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+.tool-call-dots::after {
+  content: "...";
+}
+@keyframes toolDots {
+  0% { width: 0; }
+  25% { width: 0.4em; }
+  50% { width: 0.8em; }
+  75% { width: 1.2em; }
+}
+
+/* ===== Markdown 渲染样式 ===== */
+.markdown-body {
+  line-height: 1.7;
+  letter-spacing: -0.003em;
+  word-wrap: break-word;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3,
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+  color: var(--app-text);
+}
+.markdown-body h1 { font-size: 1.5em; }
+.markdown-body h2 { font-size: 1.25em; }
+.markdown-body h3 { font-size: 1.1em; }
+
+.markdown-body p {
+  margin: 0.75em 0;
+}
+
+.markdown-body ul, .markdown-body ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+.markdown-body li {
+  margin: 0.25em 0;
+}
+.markdown-body li > p {
+  margin: 0.25em 0;
+}
+
+.markdown-body pre {
+  background: var(--code-block-bg) !important;
+  border-radius: 0;
+  padding: 1rem 1.25rem;
+  margin: 0;
+  overflow-x: auto;
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Menlo, "Ubuntu Mono", Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.7;
+}
+
+.markdown-body .code-block-wrapper {
+  margin: 0.75em 0;
+}
+
+.markdown-body .code-block-wrapper pre {
+  border: none !important;
+  border-radius: 0 !important;
+  margin: 0 !important;
+}
+
+.markdown-body pre code {
+  background: transparent !important;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+.markdown-body .inline-code {
+  background: var(--app-surface-hover);
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.375rem;
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Menlo, "Ubuntu Mono", Consolas, monospace;
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 0.8125rem;
+}
+.markdown-body th, .markdown-body td {
+  border: 1px solid var(--app-border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.markdown-body th {
+  background: var(--app-surface);
+  font-weight: 600;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--app-border);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: var(--app-text-secondary);
+}
+
+.markdown-body a {
+  color: #10a37f;
+  text-decoration: none;
+}
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--app-border);
+  margin: 1.5em 0;
+}
+
+.markdown-body strong {
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+
+/* ===== Highlight.js 代码高亮 - 暗色模式 (GitHub Dark) ===== */
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em;
+}
+code.hljs {
+  padding: 3px 5px;
+}
+
+.dark .hljs {
+  color: #c9d1d9;
+  background: #161b22;
+}
+.dark .hljs-doctag,
+.dark .hljs-keyword,
+.dark .hljs-meta .hljs-keyword,
+.dark .hljs-template-tag,
+.dark .hljs-template-variable,
+.dark .hljs-type,
+.dark .hljs-variable.language_ {
+  color: #ff7b72;
+}
+.dark .hljs-title,
+.dark .hljs-title.class_,
+.dark .hljs-title.class_.inherited__,
+.dark .hljs-title.function_ {
+  color: #d2a8ff;
+}
+.dark .hljs-attr,
+.dark .hljs-attribute,
+.dark .hljs-literal,
+.dark .hljs-meta,
+.dark .hljs-number,
+.dark .hljs-operator,
+.dark .hljs-variable,
+.dark .hljs-selector-attr,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id {
+  color: #79c0ff;
+}
+.dark .hljs-regexp,
+.dark .hljs-string,
+.dark .hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+.dark .hljs-built_in,
+.dark .hljs-symbol {
+  color: #ffa657;
+}
+.dark .hljs-comment,
+.dark .hljs-code,
+.dark .hljs-formula {
+  color: #8b949e;
+}
+.dark .hljs-name,
+.dark .hljs-quote,
+.dark .hljs-selector-tag,
+.dark .hljs-selector-pseudo {
+  color: #7ee787;
+}
+.dark .hljs-subst {
+  color: #c9d1d9;
+}
+.dark .hljs-section {
+  color: #1f6feb;
+  font-weight: bold;
+}
+.dark .hljs-bullet {
+  color: #f2cc60;
+}
+.dark .hljs-emphasis {
+  color: #c9d1d9;
+  font-style: italic;
+}
+.dark .hljs-strong {
+  color: #c9d1d9;
+  font-weight: bold;
+}
+.dark .hljs-addition {
+  color: #aff5b4;
+  background-color: #033a16;
+}
+.dark .hljs-deletion {
+  color: #ffdcd7;
+  background-color: #67060c;
+}
+
+/* ===== Highlight.js 代码高亮 - 亮色模式 (GitHub Light) ===== */
+.light .hljs {
+  color: #24292e;
+  background: #f6f8fa;
+}
+.light .hljs-doctag,
+.light .hljs-keyword,
+.light .hljs-meta .hljs-keyword,
+.light .hljs-template-tag,
+.light .hljs-template-variable,
+.light .hljs-type,
+.light .hljs-variable.language_ {
+  color: #d73a49;
+}
+.light .hljs-title,
+.light .hljs-title.class_,
+.light .hljs-title.class_.inherited__,
+.light .hljs-title.function_ {
+  color: #6f42c1;
+}
+.light .hljs-attr,
+.light .hljs-attribute,
+.light .hljs-literal,
+.light .hljs-meta,
+.light .hljs-number,
+.light .hljs-operator,
+.light .hljs-variable,
+.light .hljs-selector-attr,
+.light .hljs-selector-class,
+.light .hljs-selector-id {
+  color: #005cc5;
+}
+.light .hljs-regexp,
+.light .hljs-string,
+.light .hljs-meta .hljs-string {
+  color: #032f62;
+}
+.light .hljs-built_in,
+.light .hljs-symbol {
+  color: #e36209;
+}
+.light .hljs-comment,
+.light .hljs-code,
+.light .hljs-formula {
+  color: #6a737d;
+}
+.light .hljs-name,
+.light .hljs-quote,
+.light .hljs-selector-tag,
+.light .hljs-selector-pseudo {
+  color: #22863a;
+}
+.light .hljs-subst {
+  color: #24292e;
+}
+.light .hljs-section {
+  color: #005cc5;
+  font-weight: bold;
+}
+.light .hljs-bullet {
+  color: #735c0f;
+}
+.light .hljs-emphasis {
+  color: #24292e;
+  font-style: italic;
+}
+.light .hljs-strong {
+  color: #24292e;
+  font-weight: bold;
+}
+.light .hljs-addition {
+  color: #22863a;
+  background-color: #f0fff4;
+}
+.light .hljs-deletion {
+  color: #b31d28;
+  background-color: #ffeef0;
+}

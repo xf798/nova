@@ -1,0 +1,58 @@
+{
+  "identifier": "default",
+  "description": "Pipeline Commander 默认权限",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "notification:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-confirm",
+    "dialog:allow-message",
+    "shell:allow-open",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        { "name": "kiro-cli", "cmd": "/Users/wangxf/.local/bin/kiro-cli", "args": true },
+        { "name": "node", "cmd": "node", "args": true },
+        { "name": "sh", "cmd": "sh", "args": true }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "kiro-cli", "cmd": "/Users/wangxf/.local/bin/kiro-cli", "args": true },
+        { "name": "node", "cmd": "node", "args": true },
+        { "name": "sh", "cmd": "sh", "args": true }
+      ]
+    },
+    "shell:allow-stdin-write",
+    "shell:allow-kill",
+    "fs:default",
+    {
+      "identifier": "fs:allow-read",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "/tmp/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "/tmp/**" }
+      ]
+    },
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$HOME/**",
+        "/tmp/**"
+      ]
+    }
+  ]
+}
