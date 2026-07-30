@@ -73,6 +73,13 @@ export async function sendMessage(
   params: SendMessageParams,
   onChunk?: (content: string) => void,
   onMeta?: (meta: import("../connectors/base").StreamMeta) => void,
+  /**
+   * 召回明细就绪回调。
+   *
+   * 召回是「请求发出前」的上下文构建结果，早于流式输出即可确定，
+   * 因此单独回调，让 UI 在等待期间就能展示，而不是等整轮结束。
+   */
+  onRecall?: (recall: RecallInfo) => void,
 ): Promise<SendMessageResult> {
   const t0 = Date.now();
   const {
@@ -181,6 +188,10 @@ export async function sendMessage(
     };
     if (recalledCount > 0) {
       console.log(`[Nova:Send]   🧠 记忆回忆: ${recalledCount}条被召回`);
+    }
+    // 尽早交给 UI：召回在请求发出前就已确定，不必等整轮结束
+    if (onRecall && recall && (recall.memories.length > 0 || recall.skills.length > 0)) {
+      onRecall(recall);
     }
   }
 

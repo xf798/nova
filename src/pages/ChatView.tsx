@@ -328,6 +328,12 @@ function ChatView() {
           useSessionStore.getState().updateMessages(sessionId, (msgs) =>
             msgs.map(m => m.id === loadingId ? { ...m, meta } : m)
           , false);
+        },
+        // 召回在请求发出前就已确定，收到即写入，等待期间就能看到
+        (recall) => {
+          useSessionStore.getState().updateMessages(sessionId, (msgs) =>
+            msgs.map(m => m.id === loadingId ? { ...m, recall } : m)
+          , false);
         }
       );
 
@@ -360,9 +366,10 @@ function ChatView() {
             ? [...(m.attachments || []), ...(result.attachments || [])]
             : undefined,
           // 召回明细（可观测）：本次注入的记忆/技能
+          // 已由 onRecall 提前写入，这里不覆盖为 undefined
           recall: result.recall && (result.recall.memories.length > 0 || result.recall.skills.length > 0)
             ? result.recall
-            : undefined,
+            : m.recall,
         } : m)
       );
 
