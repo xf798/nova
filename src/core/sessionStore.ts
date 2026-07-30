@@ -107,6 +107,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       updatedAt: meta.updatedAt,
       pinned: meta.pinned || false,
       modelId: meta.modelId || undefined,
+      // 索引里没有消息，需按需从磁盘加载
+      messagesLoaded: false,
     }));
 
     if (transform) sessions = transform(sessions);
@@ -124,6 +126,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             memory: result.memory,
             // index 里没有时用 session 文件中的值兜底（兼容早期数据）
             modelId: sessions[idx].modelId ?? (result.modelId || undefined),
+            messagesLoaded: true,
           };
         }
         set(state => ({
@@ -131,6 +134,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }));
       } catch (e) {
         console.warn("[SessionStore] preload active session failed:", e);
+        // 失败也标记为已加载，否则界面会一直停在 loading
+        const idx = sessions.findIndex(s => s.id === activeSessionId);
+        if (idx >= 0) sessions[idx] = { ...sessions[idx], messagesLoaded: true };
       }
     }
 
@@ -147,6 +153,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       messages: [],
       createdAt: now,
       updatedAt: now,
+      // 新建会话无历史可加载，直接视为已加载，避免显示加载态
+      messagesLoaded: true,
     };
     set(state => ({ sessions: [session, ...state.sessions] }));
     sessionStorage.saveToDisk(session).catch(e => console.warn("[SessionStore] createSession persist failed:", e));
@@ -186,7 +194,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ activeSessionId: sessionId });
 
     const session = get().sessions.find(s => s.id === sessionId);
-    if (session && session.messages.length === 0) {
+    // 用 messagesLoaded 判断而非 messages.length：
+    // 后者会让真正空的会话每次切换都重复读盘
+    if (session && !session.messagesLoaded) {
       try {
         const result = await sessionStorage.loadMessages(sessionId);
         set(state => ({
@@ -198,6 +208,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                   memory: result.memory,
                   // index 里没有时用 session 文件中的值兜底（兼容早期数据）
                   modelId: s.modelId ?? (result.modelId || undefined),
+                  messagesLoaded: true,
                 }
               : s
           ),
@@ -205,6 +216,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }));
       } catch (e) {
         console.warn("[SessionStore] load session messages failed:", e);
+        // 加载失败也要解除加载态，否则界面会一直停在 loading
+        set(state => ({
+          sessions: state.sessions.map(s =>
+            s.id === sessionId ? { ...s, messagesLoaded: true } : s
+          ),
+        }));
       }
     }
   },

@@ -62,6 +62,14 @@ export interface ChatSession {
   pinned?: boolean;
   /** Per-session 模型选择（覆盖连接器默认模型） */
   modelId?: string;
+  /**
+   * messages 是否已从磁盘加载。
+   *
+   * 用于区分「真的是空会话」与「有历史但尚未加载」——
+   * 二者的 messages 都是空数组，若不区分会在加载历史时闪出欢迎页。
+   * 新建会话直接为 true（无历史可加载）。
+   */
+  messagesLoaded?: boolean;
 }
 
 // Re-export core services

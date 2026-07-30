@@ -43,6 +43,7 @@ function ChatView() {
   const { activeConnector, setPreviewPanel } = useAppStore();
   const sessions = useSessionStore(s => s.sessions);
   const activeSessionId = useSessionStore(s => s.activeSessionId);
+  const storeLoaded = useSessionStore(s => s.loaded);
   const [processingSessions, setProcessingSessions] = useState<Set<string>>(new Set());
   const [isDragging, setIsDragging] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -110,7 +111,10 @@ function ChatView() {
 
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const messages = activeSession?.messages || [];
-  const isEmpty = messages.filter(m => m.role !== "system").length === 0;
+  // 区分「有历史正在加载」与「真的是空会话」：
+  // 两者 messages 都为空，若不区分会在加载历史时闪出欢迎页
+  const isHistoryLoading = !storeLoaded || (!!activeSession && !activeSession.messagesLoaded);
+  const isEmpty = !isHistoryLoading && messages.filter(m => m.role !== "system").length === 0;
 
   // 切换会话或消息加载完成时，强制滚到底部
   const prevSessionRef = useRef<string | null>(null);
@@ -491,7 +495,14 @@ function ChatView() {
           }
         }
       }}>
-        {isEmpty ? (
+        {isHistoryLoading ? (
+          <div className="h-full flex flex-col items-center justify-center gap-3">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            <span className="text-[13px] text-app-text-muted">加载会话…</span>
+          </div>
+        ) : isEmpty ? (
           <div className="h-full flex flex-col items-center justify-center px-6">
             <h1 className="text-[28px] font-semibold mb-2 text-app-text">有什么我能帮你的吗？</h1>
             <p className="text-sm text-app-text-muted mb-8">{activeConnector.config.name}</p>
