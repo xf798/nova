@@ -346,6 +346,10 @@ function ChatView() {
             toolCalls: (result.meta?.toolCalls && result.meta.toolCalls.length > 0)
               ? result.meta.toolCalls
               : (m.meta as any)?.toolCalls,
+            // timeline 同理：连接器最终返回的更完整（已封段），否则沿用流式期间的
+            timeline: (result.meta?.timeline && result.meta.timeline.length > 0)
+              ? result.meta.timeline
+              : (m.meta as any)?.timeline,
           },
           // 合并：保留 MCP tool 执行期间已附加的 attachments（如截图），再追加 sendMessage 返回的
           attachments: [...(m.attachments || []), ...(result.attachments || [])].length > 0

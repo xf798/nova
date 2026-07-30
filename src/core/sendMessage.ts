@@ -9,7 +9,7 @@
 // 3. Tool loop（function calling）执行与结果回注
 // 4. Legacy inline [ACTION:...] fallback（kiro-cli 兼容）
 
-import type { Connector, HistoryMessage } from "../connectors/base";
+import type { Connector, HistoryMessage, TimelineEvent, TimelineToolEvent } from "../connectors/base";
 import type { Message, RecallInfo } from "./types";
 import type { SessionMemory } from "./memory";
 import type { RecallContext } from "./memory/recall";
@@ -215,21 +215,70 @@ export async function sendMessage(
   let toolLoopCount = 0;
   const accumulatedToolMessages: any[] = [];  // 累积所有轮次的 tool 交互
 
+  // ─── 跨轮过程时间线 ───
+  // tool loop 会多次调用 connector.send()，每轮各自产出 timeline；
+  // 工具事件由本层记录。三者需按真实顺序拼成一条完整时间线，
+  // 否则每轮 onMeta 整体替换会把前面的过程冲掉。
+  const mergedTimeline: TimelineEvent[] = [];
+  const seenTimelineKeys = new Set<string>();
+
+  /** 事件去重键：工具用 id，文本/思考用 kind+at（同一段重复 emit 时不重复插入） */
+  const timelineKey = (e: TimelineEvent): string =>
+    e.kind === "tool" ? `tool:${e.toolCallId}` : `${e.kind}:${e.at}`;
+
+  /** 并入连接器某一轮产出的过程事件（同段内容更新则就地覆盖） */
+  const appendConnectorTimeline = (events?: TimelineEvent[]) => {
+    if (!events || events.length === 0) return;
+    for (const ev of events) {
+      const key = timelineKey(ev);
+      if (seenTimelineKeys.has(key)) {
+        const idx = mergedTimeline.findIndex(e => timelineKey(e) === key);
+        if (idx >= 0) mergedTimeline[idx] = { ...ev };
+        continue;
+      }
+      seenTimelineKeys.add(key);
+      mergedTimeline.push({ ...ev });
+    }
+  };
+
+  const snapshotMerged = (): TimelineEvent[] => mergedTimeline.map(e => ({ ...e }));
+
   while (result.toolCalls && result.toolCalls.length > 0 && toolLoopCount < MAX_TOOL_LOOPS) {
     toolLoopCount++;
     console.log(`[Nova:Send]   🔧 Tool Loop #${toolLoopCount}: ${result.toolCalls.map(t => t.name).join(", ")}`);
 
+    // 把本轮连接器产出的过程事件并入累积 timeline
+    appendConnectorTimeline(result.meta?.timeline);
+
+    const loopToolCalls = result.toolCalls.map(tc => ({
+      toolCallId: tc.id,
+      title: tc.name,
+      kind: "execute",
+      status: "in_progress" as const,
+      startedAt: Date.now(),
+    }));
+
+    // 记录工具事件到 timeline（进行中）
+    for (const tc of loopToolCalls) {
+      const key = `tool:${tc.toolCallId}`;
+      if (seenTimelineKeys.has(key)) continue;
+      seenTimelineKeys.add(key);
+      mergedTimeline.push({
+        kind: "tool",
+        toolCallId: tc.toolCallId,
+        title: tc.title,
+        toolKind: tc.kind,
+        status: "in_progress",
+        at: tc.startedAt,
+      });
+    }
+
     // 通知 UI：tool 执行中
     if (onMeta) {
       onMeta({
-        toolCalls: result.toolCalls.map(tc => ({
-          toolCallId: tc.id,
-          title: tc.name,
-          kind: "execute",
-          status: "in_progress" as const,
-          startedAt: Date.now(),
-        })),
+        toolCalls: loopToolCalls,
         activeTool: result.toolCalls[0].name,
+        timeline: snapshotMerged(),
       });
     }
 
@@ -259,6 +308,17 @@ export async function sendMessage(
     }
 
     // 通知 UI：tool 执行完成
+    const completedAt = Date.now();
+    for (const tc of result.toolCalls) {
+      const ev = mergedTimeline.find(
+        (e): e is TimelineToolEvent => e.kind === "tool" && e.toolCallId === tc.id,
+      );
+      if (ev) {
+        const r = allToolResults.find(x => x.tool === tc.name);
+        ev.status = r && !r.result.ok ? "failed" : "completed";
+        ev.completedAt = completedAt;
+      }
+    }
     if (onMeta) {
       onMeta({
         toolCalls: result.toolCalls.map(tc => ({
@@ -266,10 +326,11 @@ export async function sendMessage(
           title: tc.name,
           kind: "execute",
           status: "completed" as const,
-          startedAt: Date.now() - 100,
-          completedAt: Date.now(),
+          startedAt: completedAt - 100,
+          completedAt,
         })),
         activeTool: "",
+        timeline: snapshotMerged(),
       });
     }
 
@@ -291,6 +352,8 @@ export async function sendMessage(
   }
 
   if (toolLoopCount > 0) {
+    // 并入最后一轮（不再触发工具的那次）连接器产出的过程事件
+    appendConnectorTimeline(result.meta?.timeline);
     console.log(`[Nova:Send]   🔧 Tool Loop 结束，共 ${toolLoopCount} 轮，执行了 ${allToolResults.length} 个 tools`);
   }
 
@@ -309,16 +372,35 @@ export async function sendMessage(
 
       // 通知 UI：tool 已执行
       if (onMeta) {
+        const inlineNow = Date.now();
+        const inlineToolCalls = inlineActions.map((r, i) => ({
+          toolCallId: `nova-tool-${i}`,
+          title: r.tool,
+          kind: "execute" as const,
+          status: (r.result.ok ? "completed" : "failed") as "completed" | "failed",
+          startedAt: inlineNow - 50,
+          completedAt: inlineNow,
+        }));
+        // inline 模式下连接器不产 tool 事件，这里补齐；正文段沿用连接器 timeline
+        appendConnectorTimeline(result.meta?.timeline);
+        for (const tc of inlineToolCalls) {
+          const key = `tool:${tc.toolCallId}`;
+          if (seenTimelineKeys.has(key)) continue;
+          seenTimelineKeys.add(key);
+          mergedTimeline.push({
+            kind: "tool",
+            toolCallId: tc.toolCallId,
+            title: tc.title,
+            toolKind: tc.kind,
+            status: tc.status,
+            at: tc.startedAt,
+            completedAt: tc.completedAt,
+          });
+        }
         onMeta({
-          toolCalls: inlineActions.map((r, i) => ({
-            toolCallId: `nova-tool-${i}`,
-            title: r.tool,
-            kind: "execute" as const,
-            status: (r.result.ok ? "completed" : "failed") as "completed" | "failed",
-            startedAt: Date.now() - 50,
-            completedAt: Date.now(),
-          })),
+          toolCalls: inlineToolCalls,
           activeTool: "",
+          timeline: snapshotMerged(),
         });
       }
 
@@ -351,7 +433,10 @@ export async function sendMessage(
     recalledCount,
     recall,
     needsHistory,
-    meta: result.meta,
+    // 有跨轮/工具事件时用合并后的完整时间线，否则沿用连接器自身的
+    meta: mergedTimeline.length > 0
+      ? { ...(result.meta || {}), timeline: snapshotMerged() }
+      : result.meta,
     attachments: toolAttachments.length > 0 ? toolAttachments : undefined,
   };
 }

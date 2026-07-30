@@ -3,7 +3,8 @@
 // 对接任何 OpenAI 兼容 API（OpenAI、Claude via proxy、Ollama、DeepSeek 等）。
 // 支持 SSE 流式输出 + function calling（tool_call）。
 
-import type { Connector, ConnectorConfig, ConnectorCapabilities, SendOptions, SendResult, TokenUsage, ToolCallRequest } from "../base";
+import type { Connector, ConnectorConfig, ConnectorCapabilities, SendOptions, SendResult, TokenUsage, ToolCallRequest, StreamMeta } from "../base";
+import { TimelineBuilder } from "../timeline";
 
 /** 流式累积的 tool_call 片段 */
 interface ToolCallAccumulator {
@@ -139,6 +140,29 @@ export class OpenAIConnector implements Connector {
       let finishReason: string | null = null;
       let thoughtAccumulated = "";  // reasoning_content 思考过程累积
 
+      // ─── 过程时间线 ───
+      // 与 kiro-cli 共用 TimelineBuilder，保证两条路径语义一致。
+      // OpenAI 兼容 API 的工具调用由上层 sendMessage 的 tool loop 驱动，
+      // 不在此处产生 tool 事件。
+      const tl = new TimelineBuilder();
+
+      /** 统一产出 meta（思考全量 + timeline 快照） */
+      const emitMeta = () => {
+        if (!onMeta) return;
+        const meta: StreamMeta = {};
+        if (thoughtAccumulated) meta.thought = thoughtAccumulated;
+        if (!tl.isEmpty) meta.timeline = tl.snapshot();
+        onMeta(meta);
+      };
+
+      /** 组装最终 meta（无内容时返回 undefined，保持原有语义） */
+      const buildFinalMeta = (): StreamMeta | undefined => {
+        const meta: StreamMeta = {};
+        if (thoughtAccumulated) meta.thought = thoughtAccumulated;
+        if (!tl.isEmpty) meta.timeline = tl.snapshot();
+        return Object.keys(meta).length > 0 ? meta : undefined;
+      };
+
       // tool_calls 累积器
       const toolCallAccumulators: Map<number, ToolCallAccumulator> = new Map();
 
@@ -166,15 +190,16 @@ export class OpenAIConnector implements Connector {
             // 文本内容
             if (delta?.content) {
               accumulated += delta.content;
+              tl.appendText(delta.content);
               onChunk(accumulated);
+              emitMeta();
             }
 
             // reasoning_content（思考过程，如智谱 GLM thinking 模式、DeepSeek 等）
             if (delta?.reasoning_content) {
               thoughtAccumulated += delta.reasoning_content;
-              if (onMeta) {
-                onMeta({ thought: thoughtAccumulated });
-              }
+              tl.appendThought(delta.reasoning_content);
+              emitMeta();
             }
 
             // tool_calls 流式解析
@@ -232,10 +257,12 @@ export class OpenAIConnector implements Connector {
         }
 
         console.log(`[OpenAI] ← tool_calls: ${toolCalls.map(t => t.name).join(", ")}`);
-        return { content: accumulated, toolCalls, usage, meta: thoughtAccumulated ? { thought: thoughtAccumulated } : undefined };
+        tl.closeSegment();
+        return { content: accumulated, toolCalls, usage, meta: buildFinalMeta() };
       }
 
-      return { content: accumulated, usage, meta: thoughtAccumulated ? { thought: thoughtAccumulated } : undefined };
+      tl.closeSegment();
+      return { content: accumulated, usage, meta: buildFinalMeta() };
     } catch (e: any) {
       if (e.name === "AbortError") {
         return { content: accumulated || "" };

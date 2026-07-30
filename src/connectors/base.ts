@@ -97,9 +97,52 @@ export interface StreamMeta {
   toolCalls?: StreamToolCall[];
   /** 当前正在执行的工具名称（空字符串表示无） */
   activeTool?: string;
-  /** Agent 思考过程 */
+  /** Agent 思考过程（全量累积，供降级渲染与下游消费） */
   thought?: string;
+  /**
+   * 按真实发生顺序排列的过程事件流。
+   *
+   * 正文文本、思考、工具调用三类事件交错记录，使 UI 能还原
+   * 「文本 → 工具 → 文本 → 思考 → 工具」这样的真实时序，
+   * 而不是把思考和工具全部堆到消息顶部。
+   *
+   * 历史消息没有该字段，渲染层会用 thought + toolCalls + content
+   * 现场拼一个近似 timeline（旧数据无文本位置信息，只能近似）。
+   */
+  timeline?: TimelineEvent[];
 }
+
+/** 过程事件：正文片段 */
+export interface TimelineTextEvent {
+  kind: "text";
+  /** 该片段的正文内容（已做流式 markdown 稳定化） */
+  text: string;
+  /** 片段开始时间 */
+  at: number;
+}
+
+/** 过程事件：思考片段 */
+export interface TimelineThoughtEvent {
+  kind: "thought";
+  text: string;
+  at: number;
+  /** 该段思考结束时间（被工具调用或正文打断时封段） */
+  endedAt?: number;
+}
+
+/** 过程事件：工具调用 */
+export interface TimelineToolEvent {
+  kind: "tool";
+  toolCallId: string;
+  title: string;
+  /** 工具类别（read / edit / execute / search / other 等） */
+  toolKind: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  at: number;
+  completedAt?: number;
+}
+
+export type TimelineEvent = TimelineTextEvent | TimelineThoughtEvent | TimelineToolEvent;
 
 /** 流式工具调用信息（供 UI 展示） */
 export interface StreamToolCall {

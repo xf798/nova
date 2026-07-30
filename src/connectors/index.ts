@@ -1,4 +1,4 @@
-export type { Connector, ConnectorConfig, ConnectorCapabilities, ConnectorType, BotPlatform, SendOptions, SendResult, HistoryMessage, ModelInfo, TokenUsage, StreamMeta, StreamToolCall } from "./base";
+export type { Connector, ConnectorConfig, ConnectorCapabilities, ConnectorType, BotPlatform, SendOptions, SendResult, HistoryMessage, ModelInfo, TokenUsage, StreamMeta, StreamToolCall, TimelineEvent, TimelineTextEvent, TimelineThoughtEvent, TimelineToolEvent } from "./base";
 export { connectorRegistry, initBuiltinConnectors, disposeAllConnectors } from "./registry";
 export { KiroCliConnector } from "./builtin/kiro-cli";
 export { OpenAIConnector } from "./builtin/openai-api";

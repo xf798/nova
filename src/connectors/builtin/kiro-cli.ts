@@ -4,6 +4,7 @@
 
 import { Command } from "@tauri-apps/plugin-shell";
 import type { Connector, ConnectorConfig, ConnectorCapabilities, SendOptions, SendResult, ModelInfo, HistoryMessage, TokenUsage, StreamMeta } from "../base";
+import { TimelineBuilder } from "../timeline";
 import { logger } from "../../core/logger";
 
 // ─── 本地文件日志（追加写入 ~/.nova/logs/acp-session.log）───
@@ -1343,6 +1344,11 @@ export class KiroCliConnector implements Connector {
       let thoughtAccumulated = ""; // Agent 思考过程（独立累积）
       let turnUsage: TokenUsage | undefined; // 本次 turn 的 token 消耗
 
+      // ─── 过程时间线 ───
+      // 按真实到达顺序记录 正文/思考/工具 三类事件，供 UI 还原交错时序。
+      // 分段与乱序容错逻辑见 connectors/timeline.ts。
+      const tl = new TimelineBuilder();
+
       // 收集所有工具调用信息，支持乱序（tool_call_update 可能先于 tool_call 到达）
       const toolCalls = new Map<string, AcpToolCall>();
 
@@ -1400,6 +1406,7 @@ export class KiroCliConnector implements Connector {
           }
           if (currentToolName) meta.activeTool = currentToolName;
           if (thoughtAccumulated) meta.thought = thoughtAccumulated;
+          if (!tl.isEmpty) meta.timeline = tl.snapshot();
           onMeta(meta);
         }
       };
@@ -1413,6 +1420,7 @@ export class KiroCliConnector implements Connector {
           const c = update.content;
           if (!c || Array.isArray(c) || c.type !== "text" || !c.text) return;
           accumulated += c.text;
+          tl.appendText(c.text);
           currentToolName = "";
           emitChunk();
         }
@@ -1421,6 +1429,7 @@ export class KiroCliConnector implements Connector {
           const c = update.content;
           if (!c || Array.isArray(c) || c.type !== "text" || !c.text) return;
           thoughtAccumulated += c.text;
+          tl.appendThought(c.text);
           emitChunk();
         }
         // ToolCall — 工具调用开始（ACP 标准: sessionUpdate="tool_call"）
@@ -1451,6 +1460,8 @@ export class KiroCliConnector implements Connector {
 
           currentToolName = title;
           fileLog(`[ToolCall] ${title} (${kind}) | id=${toolCallId} | status=${status}`);
+          const tcForTimeline = toolCalls.get(toolCallId);
+          if (tcForTimeline) tl.upsertTool(tcForTimeline);
           emitChunk();
         }
         // ToolCallUpdate — 工具执行进度/结束（ACP 标准: sessionUpdate="tool_call_update"）
@@ -1494,6 +1505,8 @@ export class KiroCliConnector implements Connector {
           }
 
           currentToolName = isTerminal ? "" : title;
+          const tcUpdated = toolCalls.get(toolCallId);
+          if (tcUpdated) tl.upsertTool(tcUpdated);
           emitChunk();
         }
         // TurnEnd — prompt turn 完成
@@ -1604,6 +1617,8 @@ export class KiroCliConnector implements Connector {
             }));
           }
           if (thoughtAccumulated) partialMeta.thought = thoughtAccumulated;
+          tl.closeSegment();
+          if (!tl.isEmpty) partialMeta.timeline = tl.snapshot();
           return {
             content: accumulated + "\n\n---\n⚠️ *生成中断，以上为部分内容。*",
             sessionId: this.sessionId || undefined,
@@ -1657,6 +1672,8 @@ export class KiroCliConnector implements Connector {
         }));
       }
       if (thoughtAccumulated) finalMeta.thought = thoughtAccumulated;
+      tl.closeSegment();
+      if (!tl.isEmpty) finalMeta.timeline = tl.snapshot();
 
       return {
         content: finalContent,
