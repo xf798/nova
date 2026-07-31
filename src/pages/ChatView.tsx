@@ -286,6 +286,47 @@ function ChatView() {
       console.log(`[ChatView] 🎯 Per-session 模型: "${sessionModelId}"`);
     }
 
+    // ─── 流式更新合并与节流 ───
+    //
+    // 连接器每收到一个 ACP chunk 会同时回调 onChunk（正文）与 onMeta（过程），
+    // 若各自直接写 store，一个 token 就触发两轮全量重渲染。
+    // 这里合并成一次写入并限制最小间隔，把渲染频率压到可控范围。
+    // 丢弃中间帧无妨：sendMessage 返回后会用最终结果再写一次。
+    const STREAM_FLUSH_MS = 50;
+    let pendingContent: string | null = null;
+    let pendingMeta: import("../connectors/base").StreamMeta | null = null;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushStream = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (pendingContent === null && pendingMeta === null) return;
+      const content = pendingContent;
+      const meta = pendingMeta;
+      pendingContent = null;
+      pendingMeta = null;
+      useSessionStore.getState().updateMessages(sessionId, (msgs) =>
+        msgs.map(m => {
+          if (m.id !== loadingId) return m;
+          const next = { ...m, role: "assistant" as const };
+          if (content !== null) next.content = content;
+          if (meta !== null) next.meta = meta;
+          return next;
+        })
+      , false);
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimer) return;
+      flushTimer = setTimeout(() => { flushTimer = null; flushStream(); }, STREAM_FLUSH_MS);
+    };
+
+    /** 出错时丢弃未落地的帧，避免定时器在之后写入过期内容 */
+    const cancelFlush = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      pendingContent = null;
+      pendingMeta = null;
+    };
+
     try {
 
       let firstChunkReceived = false;
@@ -316,24 +357,21 @@ function ChatView() {
         },
         (chunk: string) => {
           const displayChunk = chunk.replace(/\[ACTION:[a-zA-Z][a-zA-Z0-9_.]*\s*(?:\{[^}]*\})?\s*\]\n?/g, "").trim();
+          pendingContent = displayChunk;
           if (!firstChunkReceived) {
             firstChunkReceived = true;
+            // 首帧等最小 loading 时长后立即落地，不参与节流
             minLoadingTimer.then(() => {
-              useSessionStore.getState().updateMessages(sessionId, (msgs) =>
-                msgs.map(m => m.id === loadingId ? { ...m, role: "assistant" as const, content: displayChunk } : m)
-              , false);
+              flushStream();
               loadingReplacedResolve?.();
             });
           } else {
-            useSessionStore.getState().updateMessages(sessionId, (msgs) =>
-              msgs.map(m => m.id === loadingId ? { ...m, role: "assistant" as const, content: displayChunk } : m)
-            , false);
+            scheduleFlush();
           }
         },
         (meta) => {
-          useSessionStore.getState().updateMessages(sessionId, (msgs) =>
-            msgs.map(m => m.id === loadingId ? { ...m, meta } : m)
-          , false);
+          pendingMeta = meta;
+          scheduleFlush();
         },
         // 召回在请求发出前就已确定，收到即写入，等待期间就能看到
         (recall) => {
@@ -348,6 +386,9 @@ function ChatView() {
       } else {
         await minLoadingTimer;
       }
+
+      // 落地最后一帧，避免节流窗口内的更新丢失
+      flushStream();
 
       useSessionStore.getState().updateMessages(sessionId, (msgs) =>
         msgs.map(m => m.id === loadingId ? {
@@ -461,6 +502,7 @@ function ChatView() {
         })();
       }
     } catch (e: any) {
+      cancelFlush();
       connectorInstances.markIdle(sessionId, baseConnector.config.id);
       if (e.message?.includes("connector disposed")) {
         console.log('[ChatView] ⏭️ 忽略 disposed connector 错误');
