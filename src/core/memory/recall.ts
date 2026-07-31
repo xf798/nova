@@ -116,6 +116,16 @@ function extractPathTokens(paths: string[]): string[] {
 // ===== 评分 =====
 
 /** 分类权重：不同类型的记忆在不同场景下的重要性 */
+/**
+ * 单字 token 的匹配权重。
+ *
+ * 中文分词为「单字 + 2-gram」滑窗，单字缺乏语义区分度：
+ * 「召回」拆出的「回」、「打包」拆出的「包」在大量无关文本中都会命中。
+ * 降权后，仅命中单字的记忆难以越过召回阈值，而命中 2-gram
+ * （即真正的词）仍能拿到高分。
+ */
+const WEAK_TOKEN_WEIGHT = 0.3;
+
 const CATEGORY_WEIGHTS: Record<MemoryCategory, number> = {
   user_preference: 0.9, // 用户偏好几乎总是相关
   feedback: 0.7,        // 行为反馈较高
@@ -152,23 +162,32 @@ export function scoreMemory(
   }
 
   // 1. 关键词匹配
+  //
+  // 单字 token 降权：中文分词是「单字 + 2-gram」滑窗，没有真正的词边界。
+  // 短查询（2-3 字）拆出的单字很容易在无关文本里命中——例如「召回」拆出
+  // 的「回」几乎处处都有，会把无关记忆抬进结果。
+  // 因此单字按 WEAK_TOKEN_WEIGHT 计，2-gram 及以上按 1 计，
+  // 分母同步用加权总和，使「只命中单字」难以越过阈值。
   const memoryTokens = new Set(tokenize(memory.content));
-  let keywordHits = 0;
+  let hitWeight = 0;
+  let totalWeight = 0;
   for (const t of queryTokens) {
-    if (memoryTokens.has(t)) keywordHits++;
+    const w = t.length === 1 ? WEAK_TOKEN_WEIGHT : 1;
+    totalWeight += w;
+    if (memoryTokens.has(t)) hitWeight += w;
   }
-  const keywordScore = queryTokens.length > 0
-    ? Math.min(1, keywordHits / Math.min(queryTokens.length, 8))
+  const keywordScore = totalWeight > 0
+    ? Math.min(1, hitWeight / Math.min(totalWeight, 8))
     : 0;
 
-  // 2. 标签匹配
+  // 2. 标签匹配（同样对单字降权）
   const tagSet = new Set(memory.tags.map(t => t.toLowerCase()));
-  let tagHits = 0;
+  let tagHitWeight = 0;
   for (const t of queryTokens) {
-    if (tagSet.has(t)) tagHits++;
+    if (tagSet.has(t)) tagHitWeight += t.length === 1 ? WEAK_TOKEN_WEIGHT : 1;
   }
-  const tagScore = queryTokens.length > 0
-    ? Math.min(1, tagHits / Math.min(queryTokens.length, 4))
+  const tagScore = totalWeight > 0
+    ? Math.min(1, tagHitWeight / Math.min(totalWeight, 4))
     : 0;
 
   // 3. 时效性

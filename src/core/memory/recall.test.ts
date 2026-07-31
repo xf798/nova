@@ -63,6 +63,37 @@ describe("scoreMemory — 相关性作为闸门", () => {
   });
 });
 
+describe("scoreMemory — 单字 token 降权", () => {
+  it("只命中单字时分数低于阈值，不进结果", () => {
+    // 「打包」拆出 ["打","包","打包"]；这条只含「包」不含「打包」
+    const m = mem({ content: "用户要求先实现但不更新包、不发版" });
+    const score = scoreMemory(m, tokenize("打包"));
+    expect(score).toBeLessThan(0.15);
+  });
+
+  it("命中 2-gram（真正的词）时拿到高分", () => {
+    const m = mem({ content: "tauri build 时 targets 设为 all 会跳过打包" });
+    expect(scoreMemory(m, tokenize("打包"))).toBeGreaterThan(0.5);
+  });
+
+  it("同一查询下，含完整词的记忆显著高于仅含单字的", () => {
+    const full = mem({ content: "记忆召回的打分规则" });
+    const partial = mem({ content: "把结果回传给调用方" }); // 只含「回」
+    const toks = tokenize("召回");
+    expect(scoreMemory(full, toks)).toBeGreaterThan(scoreMemory(partial, toks) * 3);
+  });
+
+  it("纯英文查询不受降权影响（分词已过滤单字符英文）", () => {
+    const m = mem({ content: "updater 的下载状态放在模块级 store" });
+    expect(scoreMemory(m, tokenize("updater"))).toBeGreaterThan(0.5);
+  });
+
+  it("长中文查询里少量单字命中不足以入选", () => {
+    const m = mem({ content: "完全无关的内容，只是恰好有个的字" });
+    expect(scoreMemory(m, tokenize("记忆召回的规则"))).toBeLessThan(0.15);
+  });
+});
+
 describe("recallMemories — 结果集", () => {
   const pool = [
     mem({ content: "skill 同步采用 manifest 方案" }),
