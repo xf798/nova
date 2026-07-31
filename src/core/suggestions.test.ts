@@ -61,7 +61,7 @@ describe("buildSuggestions — 优先级与宁缺勿滥", () => {
       { id: "a", title: "早的任务", status: "pending", dueDate: "2026-08-06" },
     ]);
     const r = await buildSuggestions([], null);
-    expect(r.map(x => x.label)).toEqual(["继续：早的任务", "继续：晚的任务"]);
+    expect(r.map(x => x.label)).toEqual(["早的任务", "晚的任务"]);
   });
 
   it("已完成任务不参与", async () => {
@@ -71,7 +71,7 @@ describe("buildSuggestions — 优先级与宁缺勿滥", () => {
     ]);
     const r = await buildSuggestions([], null);
     expect(r.length).toBe(1);
-    expect(r[0].label).toBe("继续：在做");
+    expect(r[0].label).toBe("在做");
   });
 
   it("无截止日期的任务排在有截止日期之后", async () => {
@@ -80,7 +80,7 @@ describe("buildSuggestions — 优先级与宁缺勿滥", () => {
       { id: "b", title: "有期限", status: "pending", dueDate: "2026-08-06" },
     ]);
     const r = await buildSuggestions([], null);
-    expect(r[0].label).toBe("继续：有期限");
+    expect(r[0].label).toBe("有期限");
   });
 
   it("任务建议带上描述作为 prompt", async () => {
@@ -100,7 +100,7 @@ describe("buildSuggestions — 优先级与宁缺勿滥", () => {
     const r = await buildSuggestions(sessions, "cur");
     expect(r.length).toBe(1);
     expect(r[0].kind).toBe("session");
-    expect(r[0].label).toBe("回到：新的");
+    expect(r[0].label).toBe("新的");
     expect((r[0] as any).sessionId).toBe("s2");
   });
 
@@ -115,7 +115,7 @@ describe("buildSuggestions — 优先级与宁缺勿滥", () => {
     ]);
     const r = await buildSuggestions([], null);
     expect(r.length).toBe(1);
-    expect(r[0].label).toBe("走一遍：Nova 发布流程");
+    expect(r[0].label).toBe("Nova 发布流程");
   });
 
   it("非 workflow 分类的记忆不参与", async () => {

@@ -563,7 +563,7 @@ function ChatView() {
             <p className="text-sm text-app-text-muted mb-8">{activeConnector.config.name}</p>
             {/* 建议来自本地任务/会话/workflow 记忆；宁缺勿滥，没素材就不显示 */}
             {suggestions.length > 0 && (
-              <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
+              <div className="w-full max-w-[440px] flex flex-col gap-1.5">
                 {suggestions.map((s, i) => (
                   <button
                     key={i}
@@ -574,9 +574,30 @@ function ChatView() {
                         handleSend(s.prompt);
                       }
                     }}
-                    className="px-4 py-2.5 border border-app-border hover:bg-app-surface-hover rounded-full text-[13px] text-app-text-secondary hover:text-app-text transition-colors"
+                    title={s.kind === "task" ? "继续这个任务" : s.kind === "session" ? "回到该会话" : "按记录的流程执行"}
+                    className="group/sg flex items-center gap-2.5 w-full px-3.5 py-2.5 rounded-xl border border-app-border hover:bg-app-surface-hover hover:border-app-text-muted transition-colors text-left"
                   >
-                    {s.label}
+                    <span className="shrink-0 flex items-center text-app-text-muted group-hover/sg:text-app-text-secondary transition-colors">
+                      {s.kind === "task" ? (
+                        // 任务：勾选框
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12l3 3 5-6"/>
+                        </svg>
+                      ) : s.kind === "session" ? (
+                        // 会话：对话气泡
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                        </svg>
+                      ) : (
+                        // 流程：有序步骤
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>
+                        </svg>
+                      )}
+                    </span>
+                    <span className="min-w-0 truncate text-[13px] text-app-text-secondary group-hover/sg:text-app-text transition-colors">
+                      {s.label}
+                    </span>
                   </button>
                 ))}
               </div>

@@ -40,8 +40,8 @@ export function extractWorkflowName(content: string): string {
   return trimmed.length > 24 ? trimmed.slice(0, 24) + "…" : trimmed;
 }
 
-/** 标题截断，避免建议按钮过长 */
-function clip(s: string, n = 22): string {
+/** 标题截断；单列布局宽度充裕，可以给得比胶囊布局宽 */
+function clip(s: string, n = 34): string {
   const t = s.trim();
   return t.length > n ? t.slice(0, n) + "…" : t;
 }
@@ -77,7 +77,7 @@ export async function buildSuggestions(
     for (const t of pending) {
       out.push({
         kind: "task",
-        label: `继续：${clip(t.title)}`,
+        label: clip(t.title),
         // 带上描述，省得再问一遍任务内容
         prompt: t.description
           ? `继续这个任务：${t.title}\n\n${t.description}`
@@ -96,7 +96,7 @@ export async function buildSuggestions(
     if (recent) {
       out.push({
         kind: "session",
-        label: `回到：${clip(recent.title)}`,
+        label: clip(recent.title),
         sessionId: recent.id,
       });
     }
@@ -119,7 +119,7 @@ export async function buildSuggestions(
       if (!name) continue;
       out.push({
         kind: "workflow",
-        label: `走一遍：${clip(name)}`,
+        label: clip(name),
         prompt: `按记录的流程执行：${name}`,
       });
       added++;
