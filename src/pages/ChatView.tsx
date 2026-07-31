@@ -562,8 +562,10 @@ function ChatView() {
             <h1 className="text-[28px] font-semibold mb-2 text-app-text">有什么我能帮你的吗？</h1>
             <p className="text-sm text-app-text-muted mb-8">{activeConnector.config.name}</p>
             {/* 建议来自本地任务/会话/workflow 记忆；宁缺勿滥，没素材就不显示 */}
+            {/* 宽度与消息区/输入区一致（760px），避免缩在中间显得孤立；
+                两列等宽，既不参差也不会因标题短而显得空旷 */}
             {suggestions.length > 0 && (
-              <div className="w-full max-w-[440px] flex flex-col gap-1.5">
+              <div className="w-full max-w-[760px] px-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {suggestions.map((s, i) => (
                   <button
                     key={i}
@@ -574,7 +576,7 @@ function ChatView() {
                         handleSend(s.prompt);
                       }
                     }}
-                    title={s.kind === "task" ? "继续这个任务" : s.kind === "session" ? "回到该会话" : "按记录的流程执行"}
+                    title={`${s.label}\n${s.kind === "task" ? "继续这个任务" : s.kind === "session" ? "回到该会话" : "按记录的流程执行"}`}
                     className="group/sg flex items-center gap-2.5 w-full px-3.5 py-2.5 rounded-xl bg-app-surface hover:bg-app-surface-hover transition-colors text-left"
                   >
                     <span className="shrink-0 flex items-center text-app-text-muted group-hover/sg:text-app-text-secondary transition-colors">

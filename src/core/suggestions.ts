@@ -40,8 +40,13 @@ export function extractWorkflowName(content: string): string {
   return trimmed.length > 24 ? trimmed.slice(0, 24) + "…" : trimmed;
 }
 
-/** 标题截断；单列布局宽度充裕，可以给得比胶囊布局宽 */
-function clip(s: string, n = 34): string {
+/**
+ * 标题兜底截断。
+ *
+ * 实际省略由 CSS truncate 按像素宽度处理（比按字符数更准），
+ * 这里只防止异常长的标题进入 DOM。
+ */
+function clip(s: string, n = 60): string {
   const t = s.trim();
   return t.length > n ? t.slice(0, n) + "…" : t;
 }
