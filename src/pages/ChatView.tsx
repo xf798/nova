@@ -575,7 +575,7 @@ function ChatView() {
                       }
                     }}
                     title={s.kind === "task" ? "继续这个任务" : s.kind === "session" ? "回到该会话" : "按记录的流程执行"}
-                    className="group/sg flex items-center gap-2.5 w-full px-3.5 py-2.5 rounded-xl border border-app-border hover:bg-app-surface-hover hover:border-app-text-muted transition-colors text-left"
+                    className="group/sg flex items-center gap-2.5 w-full px-3.5 py-2.5 rounded-xl bg-app-surface hover:bg-app-surface-hover transition-colors text-left"
                   >
                     <span className="shrink-0 flex items-center text-app-text-muted group-hover/sg:text-app-text-secondary transition-colors">
                       {s.kind === "task" ? (
