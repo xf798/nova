@@ -3,11 +3,23 @@
 // 从 MessageItem 抽出，供「消息正文」与「timeline 中的正文片段」共用，
 // 避免两处各写一套 ReactMarkdown 配置。
 
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 
-function MarkdownBody({ children }: { children: string }) {
+/**
+ * Markdown 正文渲染。
+ *
+ * 必须 memo：一条消息可能被拆成多个文本段（实测最多 8 段），
+ * 流式期间每个 token 都会触发重渲染，若不 memo 就要重复跑
+ * ReactMarkdown + rehypeHighlight 解析已经稳定的段落，
+ * 造成主线程阻塞（输出卡顿、输入框卡）。
+ *
+ * memo 按 children 字符串比较，因此只有正在增长的最后一段会重新解析，
+ * 与改版前「整条消息一次解析」的开销持平。
+ */
+const MarkdownBody = memo(function MarkdownBody({ children }: { children: string }) {
   return (
     <div className="markdown-body text-[14px] leading-relaxed text-app-text">
       <ReactMarkdown
@@ -72,6 +84,6 @@ function MarkdownBody({ children }: { children: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 export default MarkdownBody;

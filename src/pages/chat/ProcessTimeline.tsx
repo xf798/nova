@@ -9,7 +9,7 @@
 // - 用户手动点过之后不再自动收起（尊重显式操作）
 // - 工具行本身只有一行，不折叠
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import MarkdownBody from "./MarkdownBody";
 import type { TimelineEvent, TimelineThoughtEvent, TimelineToolEvent } from "../../connectors";
 
@@ -90,8 +90,12 @@ const Chevron = ({ open }: { open: boolean }) => (
   </svg>
 );
 
-/** 思考段：流式中展开显示全文，结束后收成一行摘要 */
-function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isActive: boolean }) {
+/**
+ * 思考段：流式中展开显示全文，结束后收成一行摘要。
+ *
+ * 按值 memo，原因同 ToolRow：事件对象每次 emit 都会被重建。
+ */
+const ThoughtSegment = memo(function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isActive: boolean }) {
   const [expanded, setExpanded] = useState(isActive);
   const userToggled = useRef(false);
 
@@ -136,17 +140,26 @@ function ThoughtSegment({ event, isActive }: { event: TimelineThoughtEvent; isAc
       )}
     </div>
   );
-}
+}, (prev, next) =>
+  prev.isActive === next.isActive &&
+  prev.event.text === next.event.text &&
+  prev.event.at === next.event.at &&
+  prev.event.endedAt === next.event.endedAt,
+);
 
-/** 工具行：单行展示，带状态图标与耗时 */
-function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact?: boolean }) {
+/**
+ * 工具行：单行展示，带状态图标与耗时。
+ *
+ * 按值 memo：TimelineBuilder.snapshot() 每次 emit 都重建所有事件对象，
+ * 引用必变，默认浅比较无法命中，只能比较真正影响渲染的字段。
+ */
+const ToolRow = memo(function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact?: boolean }) {
   const running = event.status === "in_progress" || event.status === "pending";
   const failed = event.status === "failed";
   const duration = event.completedAt && event.at ? event.completedAt - event.at : undefined;
 
   return (
     <div className={`${compact ? "" : "my-1"} flex items-center gap-2 text-[12px] text-app-text-muted ${running ? "animate-pulse" : ""}`}>
-      {/* 顶层行的图标悬挂进左边栏；折叠组内部的行不悬挂，否则会跨过竖线 */}
       <div className="flex-shrink-0 flex items-center">
         {running ? <SpinnerIcon /> : failed ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
       </div>
@@ -156,7 +169,14 @@ function ToolRow({ event, compact = false }: { event: TimelineToolEvent; compact
       )}
     </div>
   );
-}
+}, (prev, next) =>
+  prev.compact === next.compact &&
+  prev.event.toolCallId === next.event.toolCallId &&
+  prev.event.title === next.event.title &&
+  prev.event.status === next.event.status &&
+  prev.event.at === next.event.at &&
+  prev.event.completedAt === next.event.completedAt,
+);
 
 /**
  * 连续工具分组：一串没有被文本/思考打断的工具调用收成一个可折叠块。
