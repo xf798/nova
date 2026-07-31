@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
+import { buildSuggestions } from "../core/suggestions";
+import type { Suggestion } from "../core/suggestions";
 import type { Message, QuotedMessage } from "../core/types";
 import { memoryManager } from "../core/memory";
 import { trySummarize } from "../core/memory/summarize";
@@ -13,13 +15,6 @@ import { useSessionStore } from "../core/sessionStore";
 import { scheduler } from "../core/scheduler";
 import ChatInput from "./chat/ChatInput";
 import MessageItem from "./chat/MessageItem";
-
-const SUGGESTIONS = [
-  "帮我分析一下这个问题",
-  "生成一段代码",
-  "帮我优化这个方案",
-  "解释一下这个概念",
-];
 
 // 队列项：AI 输出中排队待发的指令
 interface QueuedItem {
@@ -115,6 +110,17 @@ function ChatView() {
   // 两者 messages 都为空，若不区分会在加载历史时闪出欢迎页
   const isHistoryLoading = !storeLoaded || (!!activeSession && !activeSession.messagesLoaded);
   const isEmpty = !isHistoryLoading && messages.filter(m => m.role !== "system").length === 0;
+
+  // 新会话建议：从本地任务/会话/workflow 记忆派生，仅在空会话时需要
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  useEffect(() => {
+    if (!isEmpty) return;
+    let cancelled = false;
+    buildSuggestions(sessions, activeSessionId).then(s => {
+      if (!cancelled) setSuggestions(s);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [isEmpty, activeSessionId, sessions.length]);
 
   // 切换会话或消息加载完成时，强制滚到底部
   const prevSessionRef = useRef<string | null>(null);
@@ -513,14 +519,26 @@ function ChatView() {
           <div className="h-full flex flex-col items-center justify-center px-6">
             <h1 className="text-[28px] font-semibold mb-2 text-app-text">有什么我能帮你的吗？</h1>
             <p className="text-sm text-app-text-muted mb-8">{activeConnector.config.name}</p>
-            <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
-              {SUGGESTIONS.map((s, i) => (
-                <button key={i} onClick={() => handleSend(s)}
-                  className="px-4 py-2.5 border border-app-border hover:bg-app-surface-hover rounded-full text-[13px] text-app-text-secondary hover:text-app-text transition-colors">
-                  {s}
-                </button>
-              ))}
-            </div>
+            {/* 建议来自本地任务/会话/workflow 记忆；宁缺勿滥，没素材就不显示 */}
+            {suggestions.length > 0 && (
+              <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
+                {suggestions.map((s, i) => (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      if (s.kind === "session") {
+                        useSessionStore.getState().switchSession(s.sessionId);
+                      } else {
+                        handleSend(s.prompt);
+                      }
+                    }}
+                    className="px-4 py-2.5 border border-app-border hover:bg-app-surface-hover rounded-full text-[13px] text-app-text-secondary hover:text-app-text transition-colors"
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <div className="max-w-[760px] mx-auto py-6 px-4 space-y-4">
