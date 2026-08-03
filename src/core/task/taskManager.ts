@@ -25,6 +25,19 @@ export interface Task {
 /** tasks.json 最大任务数 */
 const MAX_TASKS = 200;
 
+/**
+ * 把任务拼成交给模型处理的首条消息。
+ *
+ * Tasks 页的「发送到新会话」和新会话首页的任务建议共用此函数，
+ * 否则两处措辞会各写一份而逐渐不一致。
+ */
+export function buildTaskPrompt(task: Pick<Task, "title" | "description">): string {
+  const desc = task.description?.trim();
+  return desc
+    ? `继续这个任务：${task.title}\n\n${desc}`
+    : `继续这个任务：${task.title}`;
+}
+
 /** 获取今天的日期字符串 YYYY-MM-DD */
 function today(): string {
   return new Date().toISOString().slice(0, 10);

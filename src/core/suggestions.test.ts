@@ -4,7 +4,12 @@ import type { ChatSession } from "./types";
 const mockGetAllTasks = vi.fn();
 const mockGetAllMemories = vi.fn();
 
-vi.mock("./task", () => ({ taskManager: { getAll: () => mockGetAllTasks() } }));
+// 只替换 taskManager（要控制返回数据），buildTaskPrompt 用真实实现，
+// 这样测试同时覆盖「建议与 Tasks 页共用同一拼装」这条约束
+vi.mock("./task", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./task")>()),
+  taskManager: { getAll: () => mockGetAllTasks() },
+}));
 vi.mock("./memory/longterm", () => ({ longTermMemory: { getAll: () => mockGetAllMemories() } }));
 
 const { buildSuggestions, extractWorkflowName } = await import("./suggestions");

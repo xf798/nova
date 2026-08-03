@@ -48,6 +48,8 @@ function ChatView() {
   const [showSkillPopover, setShowSkillPopover] = useState(false);
   const [_recalledCount, setRecalledCount] = useState(0);
   const [quotedMessage, setQuotedMessage] = useState<QuotedMessage | null>(null);
+  /** 其他页面请求发送的内容，等会话就绪后由 effect 消费 */
+  const [pendingExternalSend, setPendingExternalSend] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // ── 输入框指令队列：AI 输出中发送的消息进入队列，回答结束后自动出队 ──
@@ -103,6 +105,49 @@ function ChatView() {
     window.addEventListener("nova-add-attachment", handler);
     return () => window.removeEventListener("nova-add-attachment", handler);
   }, []);
+
+  // ===== 跨页「发送到新会话」=====
+  //
+  // Tasks 页等其他页面派发 nova-send-to-new-session 事件请求开一个新会话处理内容。
+  // ChatView 始终挂载（MainContent 用 display:none 隐藏），所以监听器一直有效，
+  // 不存在「派发时目标未挂载」的时序问题。
+  //
+  // 分两步：handler 只负责准备好会话并记下待发内容，实际发送交给下面的 effect。
+  // 直接在 handler 里调 handleSend 会读到闭包中尚未更新的 activeSession，
+  // 把消息发进旧会话。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const text = (e as CustomEvent).detail;
+      if (!text || typeof text !== "string") return;
+
+      const store = useSessionStore.getState();
+      const current = store.sessions.find(s => s.id === store.activeSessionId);
+      // 当前已是空会话就直接复用，避免堆一串空的「新对话」
+      const isEmpty = current && (current.messages?.length ?? 0) === 0;
+      if (!isEmpty) {
+        const sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        store.createSession({
+          id: sessionId,
+          title: "新对话",
+          connectorId: activeConnector.config.id,
+          connectorSessionId: null,
+        });
+        store.setActiveSessionId(sessionId);
+      }
+      setPendingExternalSend(text);
+    };
+    window.addEventListener("nova-send-to-new-session", handler);
+    return () => window.removeEventListener("nova-send-to-new-session", handler);
+  }, [activeConnector.config.id]);
+
+  // 消费待发内容。此时已完成一次渲染，activeSession 指向目标会话。
+  // 刻意不把 handleSend 放进依赖：它每次渲染都重建，会导致重复发送。
+  useEffect(() => {
+    if (!pendingExternalSend) return;
+    setPendingExternalSend(null);
+    handleSend(pendingExternalSend);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingExternalSend]);
 
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const messages = activeSession?.messages || [];

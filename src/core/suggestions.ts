@@ -9,7 +9,7 @@
 //
 // 宁缺勿滥：素材不足时就少给几条，不用泛用语凑满——凑数反而降低可信度。
 
-import { taskManager } from "./task";
+import { taskManager, buildTaskPrompt } from "./task";
 import { longTermMemory } from "./memory/longterm";
 import type { ChatSession } from "./types";
 
@@ -83,10 +83,8 @@ export async function buildSuggestions(
       out.push({
         kind: "task",
         label: clip(t.title),
-        // 带上描述，省得再问一遍任务内容
-        prompt: t.description
-          ? `继续这个任务：${t.title}\n\n${t.description}`
-          : `继续这个任务：${t.title}`,
+        // 与 Tasks 页「发送到新会话」共用拼装，措辞保持一致
+        prompt: buildTaskPrompt(t),
       });
     }
   } catch (e) {

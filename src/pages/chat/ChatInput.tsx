@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useAppStore } from "../../App";
 import { chatDrafts } from "../../core/chatDrafts";
 import { getWorkspaceDirs } from "../../plugins/builtin/workspace";
-import { bootstrapCommands, dispatchCommand, isCommandInput, runDistill } from "../../core/commands";
+import { bootstrapCommands, dispatchCommand, resolveCommand, runDistill } from "../../core/commands";
 import ConnectorSelector from "./ConnectorSelector";
 import ModelSelector from "./ModelSelector";
 
@@ -100,8 +100,10 @@ function ChatInput({
     const text = input.trim();
     if (!text && attachments.length === 0) return;
 
-    // slash 命令拦截：命中则不进普通对话
-    if (text && isCommandInput(text)) {
+    // slash 命令拦截：只有确实命中已注册命令才走命令分支。
+    // 先前按「以 / 开头」判定，会把 /Users/… 这类路径当命令，
+    // 清空输入框后既不发消息也没命令可执行，输入就丢了。
+    if (text && resolveCommand(text)) {
       setInput("");
       chatDrafts.clear(sessionId);
       dispatchCommand(text, { sessionId, notify: toast });

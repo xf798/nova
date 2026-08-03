@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { taskManager } from "../core/task";
+import { taskManager, buildTaskPrompt } from "../core/task";
 import type { Task, TaskStatus, TaskPriority } from "../core/task";
+import { useAppStore } from "../App";
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
   pending: "待办",
@@ -21,6 +22,7 @@ const PRIORITY_COLORS: Record<TaskPriority, string> = {
 };
 
 function Tasks() {
+  const { navigateTo } = useAppStore();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [newTitle, setNewTitle] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "completed">("all");
@@ -61,6 +63,19 @@ function Tasks() {
 
   const handleClearCompleted = async () => {
     await taskManager.clearCompleted();
+  };
+
+  /**
+   * 把任务交给对话处理：开新会话发出首条消息，并切到 chat 页。
+   *
+   * 派发事件而不直接调 ChatView —— ChatView 始终挂载但不在这里的组件树上，
+   * 事件是现有的跨页通信方式（参考 nova-add-attachment）。
+   */
+  const handleSendToChat = (task: Task) => {
+    window.dispatchEvent(new CustomEvent("nova-send-to-new-session", {
+      detail: buildTaskPrompt(task),
+    }));
+    navigateTo("chat");
   };
 
   const filtered = filter === "all" ? tasks :
@@ -128,6 +143,7 @@ function Tasks() {
                 await taskManager.update(id, patch);
                 setEditingId(null);
               }}
+              onSendToChat={() => handleSendToChat(task)}
             />
           ))
         )}
@@ -136,13 +152,14 @@ function Tasks() {
   );
 }
 
-function TaskItem({ task, isEditing, onEdit, onStatusChange, onDelete, onSave }: {
+function TaskItem({ task, isEditing, onEdit, onStatusChange, onDelete, onSave, onSendToChat }: {
   task: Task;
   isEditing: boolean;
   onEdit: () => void;
   onStatusChange: (id: string, status: TaskStatus) => void;
   onDelete: (id: string) => void;
   onSave: (id: string, patch: Partial<Pick<Task, "title" | "description" | "priority" | "dueDate">>) => void;
+  onSendToChat: () => void;
 }) {
   const isCompleted = task.status === "completed";
   const [editTitle, setEditTitle] = useState(task.title);
@@ -219,6 +236,18 @@ function TaskItem({ task, isEditing, onEdit, onStatusChange, onDelete, onSave }:
         </div>
 
         {/* 操作 */}
+        {!isCompleted && (
+          <button
+            onClick={onSendToChat}
+            className="opacity-0 group-hover:opacity-100 text-app-text-muted hover:text-[#10a37f] transition-all p-1"
+            title="发送到新会话处理"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 2L11 13" />
+              <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={onEdit}
           className="opacity-0 group-hover:opacity-100 text-app-text-muted hover:text-app-text transition-all p-1"

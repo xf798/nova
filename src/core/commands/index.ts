@@ -2,12 +2,14 @@
 
 import { registerCommand } from "./registry";
 import { distillCommand } from "./distill";
+// playbook 命令通过 import 副作用自注册
+import "./playbook";
 
 export type { SlashCommand, CommandContext } from "./registry";
 export {
   registerCommand,
   dispatchCommand,
-  isCommandInput,
+  resolveCommand,
   listCommands,
 } from "./registry";
 export { runDistill, distillCommand } from "./distill";
