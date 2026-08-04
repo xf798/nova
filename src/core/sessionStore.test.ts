@@ -18,7 +18,7 @@ vi.mock("./sessionStorage", () => ({
     clearPartial: vi.fn().mockResolvedValue(undefined),
     saveMeta: vi.fn().mockResolvedValue(undefined),
     deleteFromDisk: vi.fn().mockResolvedValue(undefined),
-    pageSize: vi.fn().mockResolvedValue(50),
+    pageSizes: vi.fn().mockResolvedValue({ firstPage: 10, loadMore: 30 }),
   },
 }));
 

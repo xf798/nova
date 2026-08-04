@@ -30,7 +30,7 @@ vi.mock("./sessionStorage", () => ({
     rewriteMessages: vi.fn().mockResolvedValue(undefined),
     clearPartial: vi.fn().mockResolvedValue(undefined),
     deleteFromDisk: vi.fn().mockResolvedValue(undefined),
-    pageSize: vi.fn().mockResolvedValue(50),
+    pageSizes: vi.fn().mockResolvedValue({ firstPage: 10, loadMore: 30 }),
   },
 }));
 

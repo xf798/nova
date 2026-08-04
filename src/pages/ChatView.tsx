@@ -281,15 +281,47 @@ function ChatView() {
   const handleLoadMore = async () => {
     if (!activeSessionId || isLoadingMore) return;
     setIsLoadingMore(true);
+    // 记录锚点：新消息插在顶部会把当前视图整体推下去。
+    // 记下加载前的 scrollHeight 与 scrollTop，内容进来后按增量补偿，
+    // 让用户视线停在原处而不是被弹走。
+    const el = scrollContainerRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
     try {
       const result = await useSessionStore.getState().loadMore(activeSessionId);
       if (result) setHasMoreMessages(result.hasMore);
+      if (el) {
+        // 等这一批消息渲染完再补偿，否则量到的还是旧高度
+        requestAnimationFrame(() => {
+          const delta = el.scrollHeight - prevHeight;
+          if (delta > 0) el.scrollTop = prevTop + delta;
+        });
+      }
     } catch (e) {
       console.warn("[LoadMore] 加载更多消息失败:", e);
     } finally {
       setIsLoadingMore(false);
     }
   };
+
+  // 内容撑不满视口时自动补加载。
+  //
+  // 「加载更多」原本只由向上滚动（scrollTop < 100）触发，可是内容不足一屏时
+  // 根本没有滚动条，永远触发不了 —— 历史就再也看不到了。首屏从 50 条降到
+  // 10 条后这个风险变高（短消息多的会话 10 条可能才占半屏）。
+  //
+  // 依赖渲染值：内容真正提交后才测量，否则量到的是加载态的高度。
+  useEffect(() => {
+    if (!hasMoreMessages || isLoadingMore || isSwitchingSession) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // 留 8px 容差，避免因边框/圆整误差反复触发
+    if (el.scrollHeight <= el.clientHeight + 8) {
+      handleLoadMore();
+    }
+    // handleLoadMore 每次渲染都重建，放进依赖会导致重复触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderMessages.length, hasMoreMessages, isLoadingMore, isSwitchingSession]);
 
   const handleSend = async (text?: string, queued?: QueuedSend) => {
     console.log('[ChatView] ─── handleSend 开始 ───');
@@ -730,11 +762,21 @@ function ChatView() {
           </div>
         ) : (
           <div className="max-w-[760px] mx-auto py-6 px-4 space-y-4">
-            {isLoadingMore && (
+            {/* 显式入口：滚动触发不直观（惯性滚动常越过阈值），给个按钮更可控 */}
+            {isLoadingMore ? (
               <div className="flex justify-center py-2">
-                <span className="text-sm text-app-text-muted">加载更多...</span>
+                <span className="text-[12px] text-app-text-muted">加载更多…</span>
               </div>
-            )}
+            ) : hasMoreMessages ? (
+              <div className="flex justify-center py-2">
+                <button
+                  onClick={handleLoadMore}
+                  className="px-3 py-1 rounded-full text-[12px] text-app-text-muted hover:text-app-text hover:bg-app-surface transition-colors"
+                >
+                  加载更早的消息
+                </button>
+              </div>
+            ) : null}
             {/* 用 renderMessages 而非 messages：切换会话时降为低优先级渲染 */}
             {renderMessages.map((msg, idx) => (
               <MessageItem

@@ -28,18 +28,26 @@ export interface SessionMetaPayload {
   memory?: SessionMemory;
 }
 
+/** 分页配置，取自 Rust 侧常量 */
+export interface PageSizes {
+  /** 首屏条数：追求尽快出现 */
+  firstPage: number;
+  /** 往上翻历史时每次条数：比首屏大，少翻几次 */
+  loadMore: number;
+}
+
 class SessionStorageManager {
   /** 分页大小取自 Rust 侧常量，避免前后端各写一份而漂移 */
-  private pageSizePromise: Promise<number> | null = null;
+  private pageSizesPromise: Promise<PageSizes> | null = null;
 
-  async pageSize(): Promise<number> {
-    if (!this.pageSizePromise) {
-      this.pageSizePromise = invoke<number>("get_session_page_size").catch(e => {
-        console.warn("[SessionStorage] 读取 pageSize 失败，回落 50:", e);
-        return 50;
+  async pageSizes(): Promise<PageSizes> {
+    if (!this.pageSizesPromise) {
+      this.pageSizesPromise = invoke<PageSizes>("get_session_page_size").catch(e => {
+        console.warn("[SessionStorage] 读取分页配置失败，回落默认值:", e);
+        return { firstPage: 10, loadMore: 30 };
       });
     }
-    return this.pageSizePromise;
+    return this.pageSizesPromise;
   }
 
   async migrate(): Promise<void> {
@@ -53,7 +61,8 @@ class SessionStorageManager {
   /**
    * 读取消息（offset 从尾部计算，0 表示最新一页）
    *
-   * 未传 limit 时用 Rust 侧的分页大小。
+   * 未传 limit 时按 offset 判断用哪个页大小：offset=0 是首屏（小、快），
+   * 其余是往上翻历史（大、少翻几次）。
    * partialIncluded 表示末条来自 partial 文件（尚未写入 jsonl），
    * 调用方据此确定「已追加」锚点。
    */
@@ -68,7 +77,11 @@ class SessionStorageManager {
     memory?: SessionMemory;
     modelId?: string | null;
   }> {
-    const size = limit ?? (await this.pageSize());
+    let size = limit;
+    if (size === undefined) {
+      const sizes = await this.pageSizes();
+      size = offset === 0 ? sizes.firstPage : sizes.loadMore;
+    }
     return invoke("get_session_messages", { sessionId, offset, limit: size });
   }
 

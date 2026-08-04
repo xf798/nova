@@ -785,16 +785,27 @@ fn sessions_index_path() -> PathBuf {
     data_dir().join("data").join("sessions-index.json")
 }
 
-/// 单页消息条数。
+/// 首屏消息条数。
 ///
 /// 前端通过 get_session_page_size 读取，避免两侧各写一份而漂移
 /// （改造前 sessionStorage.ts / sessionStore.ts / 这里共三份硬编码 50）。
-const SESSION_PAGE_SIZE: usize = 50;
+///
+/// 取 10 而非 50：实测 50 条要渲染 574 个块元素、157ms，而一屏只看得到
+/// 15-25 个块；10 条已有 21-133 个块，足够撑满视口且渲染降到 1/2~1/4。
+const SESSION_PAGE_SIZE: usize = 10;
+
+/// 往上翻历史时每次加载的条数。
+///
+/// 比首屏大：首屏追求尽快出现，翻页时用户已经在等待，一次多给点能少翻几次。
+const SESSION_LOAD_MORE_SIZE: usize = 30;
 
 /// 供前端读取分页大小，保证前后端同源
 #[tauri::command]
-fn get_session_page_size() -> usize {
-    SESSION_PAGE_SIZE
+fn get_session_page_size() -> serde_json::Value {
+    serde_json::json!({
+        "firstPage": SESSION_PAGE_SIZE,
+        "loadMore": SESSION_LOAD_MORE_SIZE,
+    })
 }
 
 // ===== 会话存储布局 =====//
