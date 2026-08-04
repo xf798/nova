@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useDeferredValue } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
@@ -179,6 +179,29 @@ function ChatView() {
 
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const messages = activeSession?.messages || [];
+
+  // ===== 会话切换的渲染降级 =====
+  //
+  // 切到已加载过的长会话时，messages.map 会在一次同步提交里挂载 50 条消息
+  // （实测 154 条会话的首屏 264ms，含 174 个文本段 + 188 个工具事件），
+  // 界面硬冻且没有任何提示。而首次进入因为有 loading 态反而不觉得卡——
+  // 同样的耗时，有反馈就能接受。
+  //
+  // 用 useDeferredValue 把「切换后的重渲染」降为可中断的低优先级任务：
+  // 切换瞬间先提交一帧（此时 deferredSessionId 仍是旧值 → 显示加载态），
+  // 随后 React 在后台渲染新会话，可在组件边界让出主线程。
+  // 单条消息最重 18.9ms，远低于卡顿阈值，交互不再冻结。
+  //
+  // 刻意 defer 的是 sessionId 而非 messages 数组：后者在流式输出时引用
+  // 持续变化，会让加载态不停闪烁。deferredSessionId 在同一会话内恒定，
+  // 因此流式渲染完全不受影响。
+  //
+  // 注：startTransition 在这里无效——activeSessionId 来自 zustand，
+  // React 不允许延后外部 store 的更新（tearing 风险）。
+  const deferredSessionId = useDeferredValue(activeSessionId);
+  const isSwitchingSession = deferredSessionId !== activeSessionId;
+  const renderMessages =
+    sessions.find(s => s.id === deferredSessionId)?.messages || [];
   // 区分「有历史正在加载」与「真的是空会话」：
   // 两者 messages 都为空，若不区分会在加载历史时闪出欢迎页
   const isHistoryLoading = !storeLoaded || (!!activeSession && !activeSession.messagesLoaded);
@@ -197,13 +220,21 @@ function ChatView() {
 
   // 切换会话或消息加载完成时，强制滚到底部
   const prevSessionRef = useRef<string | null>(null);
+  // 分页状态跟随真正的活跃会话（与渲染无关，用非延迟值）
   useEffect(() => {
     if (!activeSessionId) { setHasMoreMessages(false); return; }
     setHasMoreMessages(useSessionStore.getState().hasMoreMessages(activeSessionId));
+  }, [activeSessionId]);
 
-    // 会话切换了 → 强制滚到底部 + 触发容器 reflow
-    if (prevSessionRef.current !== activeSessionId) {
-      prevSessionRef.current = activeSessionId;
+  // 滚动与 reflow 必须跟随「实际渲染出来的内容」。
+  //
+  // 若依赖非延迟的 messages，切换会话时它会在仍显示加载态的那一帧触发，
+  // 此时 messagesEndRef 还没挂载，滚动无效；而真正内容提交时依赖没变化，
+  // 不会再触发一次 —— 结果是切换后停在顶部。
+  useEffect(() => {
+    // 渲染出来的会话变了 → 强制滚到底部 + 触发容器 reflow
+    if (prevSessionRef.current !== deferredSessionId) {
+      prevSessionRef.current = deferredSessionId;
       isNearBottomRef.current = true;
       // 强制容器 reflow（修复 WebView 在会话切换后不重新绘制的问题）
       const el = scrollContainerRef.current;
@@ -215,18 +246,18 @@ function ChatView() {
       }
     }
 
-    if (isNearBottomRef.current && messages.length > 0) {
+    if (isNearBottomRef.current && renderMessages.length > 0) {
       requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
       });
     }
-  }, [activeSessionId, messages.length]);
+  }, [deferredSessionId, renderMessages.length]);
 
   useEffect(() => {
     if (isNearBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages]);
+  }, [renderMessages]);
 
   useEffect(() => {
     const paths = [...attachments];
@@ -630,6 +661,10 @@ function ChatView() {
           }
         }
       }}>
+        {/* 判定顺序有讲究：
+            isEmpty 排在 isSwitchingSession 之前，因为它基于「目标会话」而非
+            渲染中的会话。这样点「新对话」时直接出欢迎页，不会先闪一下加载态
+            （空会话的渲染本来就是瞬时的，没必要等） */}
         {isHistoryLoading ? (
           <div className="h-full flex flex-col items-center justify-center gap-3">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
@@ -685,6 +720,14 @@ function ChatView() {
               </div>
             )}
           </div>
+        ) : isSwitchingSession ? (
+          // 切换到已加载的长会话：低优先级渲染进行中，先给反馈而不是冻住界面
+          <div className="h-full flex flex-col items-center justify-center gap-3">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            <span className="text-[13px] text-app-text-muted">加载会话…</span>
+          </div>
         ) : (
           <div className="max-w-[760px] mx-auto py-6 px-4 space-y-4">
             {isLoadingMore && (
@@ -692,14 +735,15 @@ function ChatView() {
                 <span className="text-sm text-app-text-muted">加载更多...</span>
               </div>
             )}
-            {messages.map((msg, idx) => (
+            {/* 用 renderMessages 而非 messages：切换会话时降为低优先级渲染 */}
+            {renderMessages.map((msg, idx) => (
               <MessageItem
                 key={msg.id}
                 message={msg}
                 onImageClick={(path) => setPreviewPanel({ type: 'image', data: path })}
                 onAddAttachment={(path) => setAttachments(prev => prev.includes(path) ? prev : [...prev, path])}
                 isSessionProcessing={isProcessing}
-                isLastMessage={idx === messages.length - 1}
+                isLastMessage={idx === renderMessages.length - 1}
                 onCopy={() => {
                   if (msg.content && msg.content !== "$$LOADING$$") {
                     navigator.clipboard.writeText(msg.content);
@@ -708,13 +752,13 @@ function ChatView() {
                 onRetry={async () => {
                   const sid = activeSessionId;
                   if (!sid) return;
-                  const msgsUpToHere = messages.slice(0, idx);
+                  const msgsUpToHere = renderMessages.slice(0, idx);
                   const lastUserMsg = [...msgsUpToHere].reverse().find(m => m.role === "user");
                   if (!lastUserMsg) return;
                   // 重试只对最后一轮有意义：删掉末尾这一问一答再重发。
                   // 走 dropTrailingMessages 而非 updateMessages —— 后者只做增量追加，
                   // 减少消息不会同步到磁盘，重发后历史里会残留旧的那一轮。
-                  const dropCount = messages.length - messages.indexOf(lastUserMsg);
+                  const dropCount = renderMessages.length - renderMessages.indexOf(lastUserMsg);
                   await useSessionStore.getState().dropTrailingMessages(sid, dropCount);
                   handleSend(lastUserMsg.content);
                 }}
