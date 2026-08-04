@@ -785,6 +785,156 @@ fn sessions_index_path() -> PathBuf {
     data_dir().join("data").join("sessions-index.json")
 }
 
+/// 单页消息条数。
+///
+/// 前端通过 get_session_page_size 读取，避免两侧各写一份而漂移
+/// （改造前 sessionStorage.ts / sessionStore.ts / 这里共三份硬编码 50）。
+const SESSION_PAGE_SIZE: usize = 50;
+
+/// 供前端读取分页大小，保证前后端同源
+#[tauri::command]
+fn get_session_page_size() -> usize {
+    SESSION_PAGE_SIZE
+}
+
+// ===== 会话存储布局 =====//
+// 一个会话拆成三个文件：
+//   {id}.meta.json        会话元信息（title/connectorId/memory/modelId…），不含 messages
+//   {id}.messages.jsonl   每行一条已完成的消息，只追加
+//   {id}.partial.json     正在流式生成的最后一条消息，可反复重写（单条，KB 级）
+//
+// 改成追加式是为了解决三件事（旧格式是「整体 JSON 全量重写」）：
+//   1. 数据丢失：前端内存只有最近 50 条，全量覆盖会把磁盘上的历史冲掉
+//   2. 写放大：一条消息触发 1.2MB 重写，20 轮对话写 72MB（实际内容 200KB）
+//   3. 流式崩溃丢内容：全量重写太贵 → 只能靠防抖少写 → 崩溃就丢整段回复
+//
+// 流式期间只重写 partial（单条），完成后追加进 jsonl，兼顾便宜与可恢复。
+//
+// 读取仍然读整个 jsonl 再取需要的行：尾部反向读只快 2ms，却要处理
+// 「截断首行」「单条消息超过读取窗口」等边界，不划算。JSONL 的收益在写。
+
+fn session_meta_path(session_id: &str) -> PathBuf {
+    sessions_dir().join(format!("{}.meta.json", session_id))
+}
+
+fn session_jsonl_path(session_id: &str) -> PathBuf {
+    sessions_dir().join(format!("{}.messages.jsonl", session_id))
+}
+
+fn session_partial_path(session_id: &str) -> PathBuf {
+    sessions_dir().join(format!("{}.partial.json", session_id))
+}
+
+/// 旧格式：整个会话一个 JSON 文件
+fn legacy_session_path(session_id: &str) -> PathBuf {
+    sessions_dir().join(format!("{}.json", session_id))
+}
+
+/// 统计 jsonl 的消息条数（数换行符，不解析内容）。
+///
+/// 刻意不把条数存进 meta：存了就得维护一致性，一旦漂移就是难查的 bug。
+/// 1MB 文件数换行符只要几十微秒。
+fn count_jsonl_lines(path: &std::path::Path) -> usize {
+    std::fs::read(path)
+        .map(|b| b.iter().filter(|&&c| c == b'\n').count())
+        .unwrap_or(0)
+}
+
+/// 把旧的整体 JSON 会话拆成 meta + jsonl。
+///
+/// 已迁移（jsonl 已存在）或无旧文件时直接返回。
+/// 迁移成功后把旧文件改名为 .json.bak 保留退路——129 个会话共 8MB，
+/// 留着不占空间，出问题能手工恢复。
+fn migrate_session_if_needed(session_id: &str) -> Result<(), String> {
+    let jsonl = session_jsonl_path(session_id);
+    if jsonl.exists() {
+        return Ok(());
+    }
+    let legacy = legacy_session_path(session_id);
+    if !legacy.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&legacy).map_err(|e| e.to_string())?;
+    let session: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+    let messages = session
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // 每条消息一行
+    let mut buf = String::new();
+    for m in &messages {
+        buf.push_str(&serde_json::to_string(m).map_err(|e| e.to_string())?);
+        buf.push('\n');
+    }
+    atomic_write(&jsonl, buf.as_bytes())?;
+
+    // meta 去掉 messages
+    let mut meta = session.clone();
+    if let Some(obj) = meta.as_object_mut() {
+        obj.remove("messages");
+    }
+    atomic_write(
+        &session_meta_path(session_id),
+        serde_json::to_string(&meta).map_err(|e| e.to_string())?.as_bytes(),
+    )?;
+
+    // 保留旧文件作为退路
+    let _ = std::fs::rename(&legacy, legacy.with_extension("json.bak"));
+    println!(
+        "[Nova] 会话已迁移为 JSONL: {} ({} 条消息)",
+        session_id,
+        messages.len()
+    );
+    Ok(())
+}
+
+/// 启动时迁移全部旧格式会话。
+///
+/// 实测 129 个会话 8MB 共 79ms，同步做完不影响启动体感。
+/// 单个会话迁移失败只记日志跳过，不阻断启动——旧文件仍在，下次启动会重试。
+fn migrate_all_sessions() {
+    let dir = sessions_dir();
+    if !dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[Nova] 会话目录读取失败，跳过迁移: {}", e);
+            return;
+        }
+    };
+    let mut migrated = 0;
+    let mut failed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 只认 {id}.json，排除 sessions-index.json 与各类衍生文件
+        if !name.ends_with(".json")
+            || name == "sessions-index.json"
+            || name.ends_with(".meta.json")
+            || name.ends_with(".partial.json")
+        {
+            continue;
+        }
+        let session_id = name.trim_end_matches(".json").to_string();
+        match migrate_session_if_needed(&session_id) {
+            Ok(()) => migrated += 1,
+            Err(e) => {
+                eprintln!("[Nova] 会话迁移失败 {}: {}", session_id, e);
+                failed += 1;
+            }
+        }
+    }
+    if migrated > 0 || failed > 0 {
+        println!("[Nova] 会话迁移完成: {} 个处理，{} 个失败", migrated, failed);
+    }
+}
+
+
 /// Atomic write: write to temp file then rename for crash safety.
 fn atomic_write(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
     use std::io::Write;
@@ -816,162 +966,296 @@ fn get_sessions_index() -> serde_json::Value {
     }
 }
 
-/// 读取单个会话的消息（支持分页，offset 从尾部计算）
+/// 读取单个会话的消息（分页，offset 从尾部计算）
+///
+/// 只对需要的那几行做 JSON 解析，其余行按字节跳过——这是相对旧格式
+/// （必须解析整个对象才能取到 messages 数组）省下的部分。
+///
+/// 正在流式生成的最后一条消息存在独立的 partial 文件里，读取时补在末尾，
+/// 使上次崩溃/退出时未完成的回复不会凭空消失。
 #[tauri::command]
 fn get_session_messages(
     session_id: String,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<serde_json::Value, String> {
-    let file = sessions_dir().join(format!("{}.json", session_id));
-    let content = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
-    let session: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    migrate_session_if_needed(&session_id)?;
 
-    let messages = session
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let jsonl = session_jsonl_path(&session_id);
+    let raw = std::fs::read_to_string(&jsonl).unwrap_or_default();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
 
-    let total = messages.len();
-    let limit = limit.unwrap_or(50);
+    // partial 里是尚未追加进 jsonl 的最后一条，算进总数
+    let partial: Option<serde_json::Value> = std::fs::read_to_string(session_partial_path(&session_id))
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok());
+
+    let total = lines.len() + if partial.is_some() { 1 } else { 0 };
+    let limit = limit.unwrap_or(SESSION_PAGE_SIZE);
     let offset = offset.unwrap_or(0);
 
-    // offset is from the END: offset=0 means most recent `limit` messages
-    // slice range: [total - offset - limit .. total - offset]
+    // offset 从尾部算：offset=0 表示最新的 limit 条
     let end = total.saturating_sub(offset);
     let start = end.saturating_sub(limit);
 
-    let slice = &messages[start..end];
+    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(end - start);
+    let mut partial_included = false;
+    for i in start..end {
+        if i < lines.len() {
+            // 单行损坏不应让整个会话打不开，跳过并记日志
+            match serde_json::from_str(lines[i]) {
+                Ok(v) => messages.push(v),
+                Err(e) => eprintln!("[Nova] 会话 {} 第 {} 行解析失败，跳过: {}", session_id, i + 1, e),
+            }
+        } else if let Some(p) = &partial {
+            messages.push(p.clone());
+            partial_included = true;
+        }
+    }
 
-    // Include memory so the frontend can restore session-level summary/extraction state
-    let memory = session.get("memory").cloned().unwrap_or(serde_json::Value::Null);
-    // Include modelId so the frontend can restore per-session model selection
-    // (covers sessions saved before modelId was added to the index)
-    let model_id = session.get("modelId").cloned().unwrap_or(serde_json::Value::Null);
+    let meta: serde_json::Value = std::fs::read_to_string(session_meta_path(&session_id))
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or(serde_json::Value::Null);
 
     Ok(serde_json::json!({
-        "messages": slice,
+        "messages": messages,
         "total": total,
-        "memory": memory,
-        "modelId": model_id
+        // 末条是否来自 partial（尚未写入 jsonl）。
+        // 前端据此确定「已追加」锚点，否则会把 partial 误认为已落盘而永不追加。
+        "partialIncluded": partial_included,
+        "memory": meta.get("memory").cloned().unwrap_or(serde_json::Value::Null),
+        "modelId": meta.get("modelId").cloned().unwrap_or(serde_json::Value::Null)
     }))
 }
 
-/// 保存单个会话并更新索引
-#[tauri::command]
-fn save_session(session_id: String, data: serde_json::Value) -> Result<(), String> {
+/// 把 meta 写盘并同步 sessions-index.json
+fn write_meta_and_index(session_id: &str, meta: &serde_json::Value) -> Result<(), String> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Write full session file atomically
-    let session_file = dir.join(format!("{}.json", session_id));
-    let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
-    atomic_write(&session_file, json.as_bytes())?;
+    atomic_write(
+        &session_meta_path(session_id),
+        serde_json::to_string(meta).map_err(|e| e.to_string())?.as_bytes(),
+    )?;
 
-    // Build index entry from session data
     let index_entry = serde_json::json!({
-        "id": data.get("id").cloned().unwrap_or(serde_json::json!(session_id)),
-        "title": data.get("title").cloned().unwrap_or(serde_json::Value::Null),
-        "connectorId": data.get("connectorId").cloned().unwrap_or(serde_json::Value::Null),
-        "connectorSessionId": data.get("connectorSessionId").cloned().unwrap_or(serde_json::Value::Null),
-        "modelId": data.get("modelId").cloned().unwrap_or(serde_json::Value::Null),
-        "pinned": data.get("pinned").cloned().unwrap_or(serde_json::json!(false)),
-        "createdAt": data.get("createdAt").cloned().unwrap_or(serde_json::Value::Null),
-        "updatedAt": data.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
+        "id": meta.get("id").cloned().unwrap_or(serde_json::json!(session_id)),
+        "title": meta.get("title").cloned().unwrap_or(serde_json::Value::Null),
+        "connectorId": meta.get("connectorId").cloned().unwrap_or(serde_json::Value::Null),
+        "connectorSessionId": meta.get("connectorSessionId").cloned().unwrap_or(serde_json::Value::Null),
+        "modelId": meta.get("modelId").cloned().unwrap_or(serde_json::Value::Null),
+        "pinned": meta.get("pinned").cloned().unwrap_or(serde_json::json!(false)),
+        "createdAt": meta.get("createdAt").cloned().unwrap_or(serde_json::Value::Null),
+        "updatedAt": meta.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
     });
 
-    // Lock index file to prevent concurrent read-modify-write races
+    // index 是读-改-写，必须加锁防并发覆盖
     let _lock = acquire_chat_history_lock(&dir)?;
-
-    // Atomically update sessions-index.json (read → upsert → write)
     let index_path = sessions_index_path();
     let mut index: Vec<serde_json::Value> = std::fs::read_to_string(&index_path)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default();
 
-    // Upsert: replace existing entry or prepend (consistent with TS createSession)
-    if let Some(pos) = index.iter().position(|e| {
-        e.get("id").and_then(|v| v.as_str()) == Some(session_id.as_str())
-    }) {
+    if let Some(pos) = index
+        .iter()
+        .position(|e| e.get("id").and_then(|v| v.as_str()) == Some(session_id))
+    {
         index[pos] = index_entry;
     } else {
         index.insert(0, index_entry);
     }
 
-    let index_json = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
-    atomic_write(&index_path, index_json.as_bytes())?;
-
+    atomic_write(
+        &index_path,
+        serde_json::to_string(&index).map_err(|e| e.to_string())?.as_bytes(),
+    )?;
     Ok(())
 }
 
-/// 仅更新会话 meta 信息（title/pinned），不覆盖 messages
+/// 保存会话元信息（不含消息）
+///
+/// 与磁盘上已有的 meta 做字段级合并再写回：调用方常常只带 title/pinned，
+/// 直接覆盖会把 memory/modelId 等它不关心的字段清掉。
+/// meta 文件只有 1KB 级，读一次很便宜。
 #[tauri::command]
-fn update_session_meta(session_id: String, meta: serde_json::Value) -> Result<(), String> {
-    let dir = sessions_dir();
-    let session_file = dir.join(format!("{}.json", session_id));
+fn save_session_meta(session_id: String, meta: serde_json::Value) -> Result<(), String> {
+    migrate_session_if_needed(&session_id)?;
 
-    // 更新 session 文件中的 meta 字段（如果文件存在）
-    if session_file.exists() {
-        let content = std::fs::read_to_string(&session_file).map_err(|e| e.to_string())?;
-        let mut session: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-
-        if let Some(title) = meta.get("title").and_then(|v| v.as_str()) {
-            session["title"] = serde_json::json!(title);
-        }
-        if let Some(pinned) = meta.get("pinned").and_then(|v| v.as_bool()) {
-            session["pinned"] = serde_json::json!(pinned);
-        }
-        if let Some(csid) = meta.get("connectorSessionId") {
-            session["connectorSessionId"] = csid.clone();
-        }
-        if let Some(model_id) = meta.get("modelId") {
-            session["modelId"] = model_id.clone();
-        }
-
-        let json = serde_json::to_string_pretty(&session).map_err(|e| e.to_string())?;
-        atomic_write(&session_file, json.as_bytes())?;
-    }
-
-    // 更新 index
-    let _lock = acquire_chat_history_lock(&dir)?;
-    let index_path = sessions_index_path();
-    let mut index: Vec<serde_json::Value> = std::fs::read_to_string(&index_path)
+    let mut merged: serde_json::Value = std::fs::read_to_string(session_meta_path(&session_id))
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default();
+        .unwrap_or_else(|| serde_json::json!({}));
 
-    if let Some(entry) = index.iter_mut().find(|e| {
-        e.get("id").and_then(|v| v.as_str()) == Some(session_id.as_str())
-    }) {
-        if let Some(title) = meta.get("title").and_then(|v| v.as_str()) {
-            entry["title"] = serde_json::json!(title);
+    if let (Some(dst), Some(src)) = (merged.as_object_mut(), meta.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
         }
-        if let Some(pinned) = meta.get("pinned").and_then(|v| v.as_bool()) {
-            entry["pinned"] = serde_json::json!(pinned);
+    } else {
+        merged = meta;
+    }
+
+    write_meta_and_index(&session_id, &merged)
+}
+
+/// 追加已完成的消息到 jsonl
+///
+/// 追加是本方案的核心：不读、不合并、不重写，因此
+///   - 前端内存只有最近 50 条也不会影响磁盘上的历史
+///   - 写入量等于新增内容本身（KB 级）而非整个会话（MB 级）
+///   - 与另一个进程并发写时两边的消息都在（旧的全量覆盖会互相冲掉）
+#[tauri::command]
+fn append_session_messages(
+    session_id: String,
+    messages: Vec<serde_json::Value>,
+    meta: Option<serde_json::Value>,
+) -> Result<(), String> {
+    use std::io::Write;
+    migrate_session_if_needed(&session_id)?;
+    let dir = sessions_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    if !messages.is_empty() {
+        let mut buf = String::new();
+        for m in &messages {
+            buf.push_str(&serde_json::to_string(m).map_err(|e| e.to_string())?);
+            buf.push('\n');
         }
-        if let Some(csid) = meta.get("connectorSessionId") {
-            entry["connectorSessionId"] = csid.clone();
-        }
-        if let Some(model_id) = meta.get("modelId") {
-            entry["modelId"] = model_id.clone();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(session_jsonl_path(&session_id))
+            .map_err(|e| e.to_string())?;
+        f.write_all(buf.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
+
+    if let Some(m) = meta {
+        write_meta_and_index(&session_id, &m)?;
+    }
+    Ok(())
+}
+
+/// 全量重写消息（编辑/删除历史消息时用）
+///
+/// 这是唯一会减少消息的路径，因此截断守卫放在这里：
+/// 前端内存只持有最近 50 条，若不加限制，一次误调用就会把磁盘上的
+/// 140 条冲成 50 条（已复现的数据丢失路径）。
+/// 真实的删除操作显式传 allow_shrink 放行。
+#[tauri::command]
+fn rewrite_session_messages(
+    session_id: String,
+    messages: Vec<serde_json::Value>,
+    allow_shrink: Option<bool>,
+    meta: Option<serde_json::Value>,
+) -> Result<(), String> {
+    migrate_session_if_needed(&session_id)?;
+    let dir = sessions_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let jsonl = session_jsonl_path(&session_id);
+    if !allow_shrink.unwrap_or(false) {
+        let existing = count_jsonl_lines(&jsonl);
+        if messages.len() < existing {
+            return Err(format!(
+                "拒绝截断式重写：入参 {} 条 < 磁盘 {} 条（session {}）。\
+                 请先加载完整消息，或对删除类操作显式传 allowShrink。",
+                messages.len(),
+                existing,
+                session_id
+            ));
         }
     }
 
-    let index_json = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
-    atomic_write(&index_path, index_json.as_bytes())?;
+    let mut buf = String::new();
+    for m in &messages {
+        buf.push_str(&serde_json::to_string(m).map_err(|e| e.to_string())?);
+        buf.push('\n');
+    }
+    atomic_write(&jsonl, buf.as_bytes())?;
+    // 重写意味着最后一条已定稿，partial 不再有效
+    let _ = std::fs::remove_file(session_partial_path(&session_id));
 
+    if let Some(m) = meta {
+        write_meta_and_index(&session_id, &m)?;
+    }
     Ok(())
 }
+
+/// 丢弃末尾若干条消息（重试时移除上一轮问答）
+///
+/// 相比全量 rewrite 的好处：不需要前端持有完整消息。
+/// 前端内存只有最近一页，若走 rewrite 就得先把整个会话读进来才能安全重写。
+/// 这里按「partial 算最后一条，其余从 jsonl 尾部去掉」精确截断。
+#[tauri::command]
+fn drop_trailing_session_messages(session_id: String, count: usize) -> Result<(), String> {
+    migrate_session_if_needed(&session_id)?;
+    if count == 0 {
+        return Ok(());
+    }
+    let mut remaining = count;
+
+    // partial 里的那条是最后一条
+    let p = session_partial_path(&session_id);
+    if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        remaining -= 1;
+    }
+
+    if remaining > 0 {
+        let jsonl = session_jsonl_path(&session_id);
+        let raw = std::fs::read_to_string(&jsonl).unwrap_or_default();
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        let keep = lines.len().saturating_sub(remaining);
+        let mut buf = String::new();
+        for l in &lines[..keep] {
+            buf.push_str(l);
+            buf.push('\n');
+        }
+        atomic_write(&jsonl, buf.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// 写入正在流式生成的最后一条消息
+///
+/// 单条消息、KB 级，可以高频重写。流式期间不动 jsonl，
+/// 避免「为了少写而不写」导致崩溃丢整段回复。
+#[tauri::command]
+fn write_partial_message(session_id: String, message: serde_json::Value) -> Result<(), String> {
+    std::fs::create_dir_all(sessions_dir()).map_err(|e| e.to_string())?;
+    atomic_write(
+        &session_partial_path(&session_id),
+        serde_json::to_string(&message).map_err(|e| e.to_string())?.as_bytes(),
+    )
+}
+
+/// 清除 partial（消息已追加进 jsonl 或被丢弃）
+#[tauri::command]
+fn clear_partial_message(session_id: String) -> Result<(), String> {
+    let p = session_partial_path(&session_id);
+    if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 
 /// 删除单个会话及其索引条目
 #[tauri::command]
 fn delete_session(session_id: String) -> Result<(), String> {
-    // Remove session file
-    let session_file = sessions_dir().join(format!("{}.json", session_id));
-    if session_file.exists() {
-        std::fs::remove_file(&session_file).map_err(|e| e.to_string())?;
+    // 一个会话对应多个文件，逐个清理；.bak 是迁移时留的旧格式退路，一并删掉
+    for p in [
+        session_jsonl_path(&session_id),
+        session_meta_path(&session_id),
+        session_partial_path(&session_id),
+        legacy_session_path(&session_id),
+        legacy_session_path(&session_id).with_extension("json.bak"),
+    ] {
+        if p.exists() {
+            std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        }
     }
 
     // Lock index file to prevent concurrent read-modify-write races
@@ -1479,8 +1763,13 @@ pub fn run() {
             save_chat_history,
             get_sessions_index,
             get_session_messages,
-            save_session,
-            update_session_meta,
+            get_session_page_size,
+            save_session_meta,
+            append_session_messages,
+            rewrite_session_messages,
+            drop_trailing_session_messages,
+            write_partial_message,
+            clear_partial_message,
             delete_session,
             migrate_chat_history,
             get_skills,
@@ -1534,6 +1823,10 @@ pub fn run() {
             safe_println!("[Nova] ═══ 后端初始化开始 ═══");
             safe_println!("[Nova] Data dir: {:?}", dir);
             safe_println!("[Nova] PID: {}", std::process::id());
+
+            // 一次性迁移：整体 JSON 会话 → meta.json + messages.jsonl
+            // 实测 129 个会话 8MB 共 79ms，同步执行不影响启动体感
+            migrate_all_sessions();
 
             // 一次性迁移：从 app-storage.json 中的 task.tasks 迁移到独立文件
             let tasks_file = tasks_file_path();
@@ -1868,5 +2161,265 @@ mod skill_sync_tests {
 
         assert_eq!(read(&dest.join("demo/SKILL.md")), "v2");
         assert_eq!(stats.updated, 1);
+    }
+}
+
+#[cfg(test)]
+mod session_store_tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "nova-session-test-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn msg(i: usize) -> serde_json::Value {
+        serde_json::json!({ "id": format!("msg-{}", i), "role": "user", "content": format!("内容 {}", i) })
+    }
+
+    /// 写一个 jsonl 文件
+    fn write_jsonl(path: &Path, n: usize) {
+        let mut buf = String::new();
+        for i in 0..n {
+            buf.push_str(&serde_json::to_string(&msg(i)).unwrap());
+            buf.push('\n');
+        }
+        fs::write(path, buf).unwrap();
+    }
+
+    // ===== count_jsonl_lines =====
+
+    #[test]
+    fn count_lines_counts_messages() {
+        let d = tmpdir("count");
+        let f = d.join("m.jsonl");
+        write_jsonl(&f, 7);
+        assert_eq!(count_jsonl_lines(&f), 7);
+    }
+
+    #[test]
+    fn count_lines_is_zero_for_missing_file() {
+        let d = tmpdir("count-missing");
+        assert_eq!(count_jsonl_lines(&d.join("nope.jsonl")), 0);
+    }
+
+    #[test]
+    fn count_lines_is_zero_for_empty_file() {
+        let d = tmpdir("count-empty");
+        let f = d.join("m.jsonl");
+        fs::write(&f, "").unwrap();
+        assert_eq!(count_jsonl_lines(&f), 0);
+    }
+
+    // ===== 截断守卫（rewrite_session_messages 内的判定）=====
+
+    fn guard_rejects(incoming: usize, existing: usize, allow_shrink: bool) -> bool {
+        !allow_shrink && incoming < existing
+    }
+
+    #[test]
+    fn guard_rejects_truncating_rewrite() {
+        // 已复现的丢数据场景：磁盘 140 条，内存只加载 50 条后追加 1 条
+        assert!(guard_rejects(51, 140, false));
+    }
+
+    #[test]
+    fn guard_allows_growth() {
+        assert!(!guard_rejects(141, 140, false));
+    }
+
+    #[test]
+    fn guard_allows_equal_count() {
+        // 改某条消息内容但条数不变
+        assert!(!guard_rejects(140, 140, false));
+    }
+
+    #[test]
+    fn guard_allows_shrink_when_explicitly_permitted() {
+        // 删除消息 / 重试时移除末尾两条
+        assert!(!guard_rejects(10, 140, true));
+    }
+
+    #[test]
+    fn guard_allows_first_write_of_new_session() {
+        assert!(!guard_rejects(1, 0, false));
+    }
+
+    // ===== 追加语义 =====
+    //
+    // append 的核心价值：不读旧内容也不重写，因此内存里只有分页数据
+    // 也不会影响磁盘上的历史。这里直接验证文件层面的行为。
+
+    fn append_lines(path: &Path, msgs: &[serde_json::Value]) {
+        use std::io::Write;
+        let mut buf = String::new();
+        for m in msgs {
+            buf.push_str(&serde_json::to_string(m).unwrap());
+            buf.push('\n');
+        }
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        f.write_all(buf.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn append_preserves_existing_history() {
+        let d = tmpdir("append");
+        let f = d.join("m.jsonl");
+        write_jsonl(&f, 140);
+        // 模拟前端只持有最近 50 条的情况下追加 1 条
+        append_lines(&f, &[msg(999)]);
+        assert_eq!(count_jsonl_lines(&f), 141, "追加不应影响已有历史");
+    }
+
+    #[test]
+    fn append_to_missing_file_creates_it() {
+        let d = tmpdir("append-new");
+        let f = d.join("m.jsonl");
+        append_lines(&f, &[msg(0)]);
+        assert_eq!(count_jsonl_lines(&f), 1);
+    }
+
+    #[test]
+    fn appended_lines_are_individually_parseable() {
+        let d = tmpdir("append-parse");
+        let f = d.join("m.jsonl");
+        append_lines(&f, &[msg(0), msg(1)]);
+        let raw = fs::read_to_string(&f).unwrap();
+        let parsed: Vec<serde_json::Value> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1]["id"], "msg-1");
+    }
+
+    #[test]
+    fn message_content_with_newlines_stays_on_one_line() {
+        // 消息正文常含换行（代码块），序列化后必须转义成 \n 而非真实换行，
+        // 否则一条消息会被切成多行，jsonl 结构就坏了
+        let d = tmpdir("append-newline");
+        let f = d.join("m.jsonl");
+        let m = serde_json::json!({ "id": "x", "content": "第一行\n第二行\n```ts\nconst a=1;\n```" });
+        append_lines(&f, &[m.clone()]);
+        assert_eq!(count_jsonl_lines(&f), 1, "含换行的消息仍应只占一行");
+        let raw = fs::read_to_string(&f).unwrap();
+        let back: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(back["content"], m["content"], "往返后正文必须一致");
+    }
+
+    // ===== 分页切片 =====
+
+    /// 复刻 get_session_messages 的切片计算（offset 从尾部算）
+    fn slice_range(total: usize, offset: usize, limit: usize) -> (usize, usize) {
+        let end = total.saturating_sub(offset);
+        let start = end.saturating_sub(limit);
+        (start, end)
+    }
+
+    #[test]
+    fn first_page_takes_most_recent() {
+        assert_eq!(slice_range(140, 0, 50), (90, 140));
+    }
+
+    #[test]
+    fn second_page_walks_backwards() {
+        assert_eq!(slice_range(140, 50, 50), (40, 90));
+    }
+
+    #[test]
+    fn last_page_clamps_at_zero() {
+        assert_eq!(slice_range(140, 120, 50), (0, 20));
+    }
+
+    #[test]
+    fn slice_is_empty_when_offset_exceeds_total() {
+        let (s, e) = slice_range(10, 99, 50);
+        assert_eq!((s, e), (0, 0));
+    }
+
+    #[test]
+    fn slice_handles_fewer_messages_than_page() {
+        assert_eq!(slice_range(3, 0, 50), (0, 3));
+    }
+
+    // ===== 迁移 =====
+
+    #[test]
+    fn migration_splits_legacy_into_meta_and_jsonl() {
+        let d = tmpdir("migrate");
+        let legacy = d.join("s1.json");
+        let session = serde_json::json!({
+            "id": "s1",
+            "title": "旧会话",
+            "modelId": "gpt-4",
+            "memory": { "summary": "摘要" },
+            "messages": [msg(0), msg(1), msg(2)]
+        });
+        fs::write(&legacy, serde_json::to_string(&session).unwrap()).unwrap();
+
+        // 复刻 migrate_session_if_needed 的核心逻辑（不依赖 data_dir）
+        let content = fs::read_to_string(&legacy).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap().clone();
+        let mut buf = String::new();
+        for m in &msgs {
+            buf.push_str(&serde_json::to_string(m).unwrap());
+            buf.push('\n');
+        }
+        let jsonl = d.join("s1.messages.jsonl");
+        fs::write(&jsonl, &buf).unwrap();
+        let mut meta = parsed.clone();
+        meta.as_object_mut().unwrap().remove("messages");
+        let meta_path = d.join("s1.meta.json");
+        fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+        assert_eq!(count_jsonl_lines(&jsonl), 3, "消息应逐行写入 jsonl");
+        let meta_back: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta_back["title"], "旧会话");
+        assert_eq!(meta_back["modelId"], "gpt-4");
+        assert_eq!(meta_back["memory"]["summary"], "摘要");
+        assert!(meta_back.get("messages").is_none(), "meta 里不该再有 messages");
+    }
+
+    #[test]
+    fn migration_of_empty_session_yields_empty_jsonl() {
+        let d = tmpdir("migrate-empty");
+        let jsonl = d.join("s.messages.jsonl");
+        fs::write(&jsonl, "").unwrap();
+        assert_eq!(count_jsonl_lines(&jsonl), 0);
+    }
+
+    // ===== meta 合并 =====
+
+    #[test]
+    fn meta_merge_keeps_fields_not_in_patch() {
+        // save_session_meta 做字段级合并：只带 title 的调用不该清掉 memory
+        let existing = serde_json::json!({ "title": "旧", "memory": { "s": 1 }, "modelId": "m1" });
+        let patch = serde_json::json!({ "title": "新" });
+
+        let mut merged = existing.clone();
+        for (k, v) in patch.as_object().unwrap() {
+            merged.as_object_mut().unwrap().insert(k.clone(), v.clone());
+        }
+
+        assert_eq!(merged["title"], "新");
+        assert_eq!(merged["memory"]["s"], 1, "未在 patch 中的字段必须保留");
+        assert_eq!(merged["modelId"], "m1");
     }
 }

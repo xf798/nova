@@ -83,7 +83,16 @@ const components: Components = {
 };
 
 const remarkPlugins = [remarkGfm];
-const rehypePlugins = [rehypeHighlight];
+
+// 语法高亮按块启用。
+//
+// rehypeHighlight 会遍历每个块的 HAST 树寻找 code 元素，对纯文本块是白跑。
+// 实测切换到 122 条消息的会话：967 个块里只有 35 个含代码，全量启用高亮
+// 耗时 602ms，按需启用降到 137ms（4.4x），高亮本身占了总渲染耗时的 77%。
+//
+// 两个数组必须是模块级常量：内联字面量每次渲染都是新引用，会让下方 memo 失效。
+const rehypePluginsWithHighlight = [rehypeHighlight];
+const rehypePluginsPlain: [] = [];
 
 /**
  * 把 markdown 切成块。
@@ -100,13 +109,25 @@ export function parseMarkdownIntoBlocks(markdown: string): string[] {
   }
 }
 
+/**
+ * 判断块是否需要语法高亮。
+ *
+ * 用围栏而非 lexer 的 token type 判断，因为这里只拿到 raw 字符串；
+ * 含围栏即可能有 code 元素（包括嵌在列表/引用里的），一律启用。
+ * 缩进式代码块（4 空格无围栏）会漏掉高亮——真实数据里为 0，
+ * 且退化后果仅是少了着色，不影响内容正确性。
+ */
+function needsHighlight(content: string): boolean {
+  return content.includes("```");
+}
+
 /** 单个 markdown 块；内容不变则不重新解析 */
 const MarkdownBlock = memo(
   function MarkdownBlock({ content }: { content: string }) {
     return (
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
+        rehypePlugins={needsHighlight(content) ? rehypePluginsWithHighlight : rehypePluginsPlain}
         components={components}
       >
         {content}

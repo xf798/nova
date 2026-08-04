@@ -10,9 +10,15 @@ vi.mock("./sessionStorage", () => ({
     migrate: () => mockMigrate(),
     loadIndex: () => mockIndex(),
     loadMessages: (id: string) => mockLoadMessages(id),
-    saveToDisk: vi.fn().mockResolvedValue(undefined),
-    updateMetaOnDisk: vi.fn().mockResolvedValue(undefined),
+    // 增量写入的三条路径
+    appendMessages: vi.fn().mockResolvedValue(undefined),
+    rewriteMessages: vi.fn().mockResolvedValue(undefined),
+    dropTrailing: vi.fn().mockResolvedValue(undefined),
+    writePartial: vi.fn().mockResolvedValue(undefined),
+    clearPartial: vi.fn().mockResolvedValue(undefined),
+    saveMeta: vi.fn().mockResolvedValue(undefined),
     deleteFromDisk: vi.fn().mockResolvedValue(undefined),
+    pageSize: vi.fn().mockResolvedValue(50),
   },
 }));
 

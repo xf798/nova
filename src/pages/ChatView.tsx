@@ -3,8 +3,9 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
 import { buildSuggestions } from "../core/suggestions";
+import { chatAttachments } from "../core/chatAttachments";
 import type { Suggestion } from "../core/suggestions";
-import type { Message, QuotedMessage } from "../core/types";
+import type { QuotedMessage } from "../core/types";
 import { memoryManager } from "../core/memory";
 import { trySummarize } from "../core/memory/summarize";
 import { tryExtractMemories } from "../core/memory/extractor";
@@ -41,15 +42,16 @@ function ChatView() {
   const storeLoaded = useSessionStore(s => s.loaded);
   const [processingSessions, setProcessingSessions] = useState<Set<string>>(new Set());
   const [isDragging, setIsDragging] = useState(false);
-  const [attachments, setAttachments] = useState<string[]>([]);
+  // 待发附件按会话隔离（同草稿）：ChatView 常驻挂载，切会话不重建组件，
+  // 若用单个 state 会把附件带进新会话
+  const [attachments, setAttachments] = useState<string[]>(() => chatAttachments.get(activeSessionId));
   const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(null);
   const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
   const [activeSkills, setActiveSkills] = useState<{ name: string; description: string; matched: boolean }[]>([]);
   const [showSkillPopover, setShowSkillPopover] = useState(false);
   const [_recalledCount, setRecalledCount] = useState(0);
   const [quotedMessage, setQuotedMessage] = useState<QuotedMessage | null>(null);
-  /** 其他页面请求发送的内容，等会话就绪后由 effect 消费 */
-  const [pendingExternalSend, setPendingExternalSend] = useState<string | null>(null);
+  /** 其他页面请求发送的内容，等会话就绪后由 effect 消费 */  const [pendingExternalSend, setPendingExternalSend] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // ── 输入框指令队列：AI 输出中发送的消息进入队列，回答结束后自动出队 ──
@@ -105,6 +107,32 @@ function ChatView() {
     window.addEventListener("nova-add-attachment", handler);
     return () => window.removeEventListener("nova-add-attachment", handler);
   }, []);
+
+  // ===== 附件的会话隔离 =====
+  //
+  // 切换会话时把当前附件存回原会话，再载入目标会话的。
+  // 用 ref 记录上一个 sessionId，与 ChatInput 处理草稿的方式一致。
+  const prevAttachSessionRef = useRef<string | null>(activeSessionId);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+
+  useEffect(() => {
+    const prevId = prevAttachSessionRef.current;
+    if (prevId === activeSessionId) return;
+    chatAttachments.set(prevId, attachmentsRef.current);
+    setAttachments(chatAttachments.get(activeSessionId));
+    prevAttachSessionRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  // 附件变化时落盘，保证重启后与草稿一起恢复。
+  //
+  // 依赖刻意只有 attachments，写入目标取 ref 而非 activeSessionId：
+  // 切换会话的那一次渲染里 activeSessionId 已是新值但 attachments 仍是旧值，
+  // 若依赖两者，会用旧附件覆盖目标会话刚恢复出来的记录。
+  // 上面的切换 effect 先跑并已把 ref 指向新会话，此处写入即正确。
+  useEffect(() => {
+    chatAttachments.set(prevAttachSessionRef.current, attachments);
+  }, [attachments]);
 
   // ===== 跨页「发送到新会话」=====
   //
@@ -266,7 +294,14 @@ function ChatView() {
     // 记录用户活跃，供调度引擎 idle 触发判断
     scheduler.markActivity();
     const attached = [...srcAttachments];
-    if (!fromQueue) setAttachments([]);
+    if (!fromQueue) {
+      setAttachments([]);
+      // 显式清掉来源会话的记录，不依赖「两个 setState 被批处理」这一假设：
+      // 若发送时顺带新建了会话（ensureSession），未批处理的情况下切换 effect
+      // 会用尚未清空的附件写回原会话，让已发出的附件残留在 New Chat 槽里。
+      // 此刻 prevAttachSessionRef 仍指向持有这批附件的会话。
+      chatAttachments.clear(prevAttachSessionRef.current);
+    }
 
     const persistedAttachments = await Promise.all(
       attached.map(async (p) => {
@@ -670,14 +705,17 @@ function ChatView() {
                     navigator.clipboard.writeText(msg.content);
                   }
                 }}
-                onRetry={() => {
+                onRetry={async () => {
+                  const sid = activeSessionId;
+                  if (!sid) return;
                   const msgsUpToHere = messages.slice(0, idx);
                   const lastUserMsg = [...msgsUpToHere].reverse().find(m => m.role === "user");
                   if (!lastUserMsg) return;
-                  const sid = activeSessionId;
-                  if (!sid) return;
-                  const filterFn = (m: Message) => m.id !== msg.id && m.id !== lastUserMsg.id;
-                  useSessionStore.getState().updateMessages(sid, (msgs) => msgs.filter(filterFn));
+                  // 重试只对最后一轮有意义：删掉末尾这一问一答再重发。
+                  // 走 dropTrailingMessages 而非 updateMessages —— 后者只做增量追加，
+                  // 减少消息不会同步到磁盘，重发后历史里会残留旧的那一轮。
+                  const dropCount = messages.length - messages.indexOf(lastUserMsg);
+                  await useSessionStore.getState().dropTrailingMessages(sid, dropCount);
                   handleSend(lastUserMsg.content);
                 }}
                 onQuote={() => {
