@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useAppStore } from "../../App";
 import { useSessionStore } from "../../core/sessionStore";
 import { connectorInstances, connectorRegistry } from "../../connectors";
+import { pendingModel } from "../../core/pendingModel";
 import type { ModelInfo } from "../../connectors";
 
 function ModelSelector() {
@@ -15,7 +16,14 @@ function ModelSelector() {
   const [isOpen, setIsOpen] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(false);
+  /** 无会话时选的模型（会话创建后由 ensureSession 落地），仅用于按钮回显 */
+  const [pendingSelection, setPendingSelection] = useState<string | undefined>(() => pendingModel.get());
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // 会话建好后暂存值已被消费，回显交回 session
+  useEffect(() => {
+    if (activeSessionId) setPendingSelection(undefined);
+  }, [activeSessionId]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -29,7 +37,8 @@ function ModelSelector() {
 
   if (!activeConnector.capabilities.supportsModelSwitch) return null;
 
-  const currentModel = sessionModelId || "auto";
+  // 无会话时用暂存值回显，避免选了却显示 Auto
+  const currentModel = sessionModelId || pendingSelection || "auto";
 
   const handleOpen = async () => {
     if (isOpen) { setIsOpen(false); return; }
@@ -45,7 +54,15 @@ function ModelSelector() {
   };
 
   const handleSelect = (modelId: string) => {
-    if (!activeSessionId) return;
+    // 无 activeSessionId 的情况是「点了新对话但还没发消息」——会话是懒创建的。
+    // 先暂存，等 ensureSession 创建会话时作为初始 modelId 落地，
+    // 否则选择被直接丢弃，表现为点了没反应。
+    if (!activeSessionId) {
+      pendingModel.set(modelId);
+      setPendingSelection(modelId);
+      setIsOpen(false);
+      return;
+    }
     // 写入 session 持久化
     useSessionStore.getState().updateMeta(activeSessionId, { modelId });
     // 同时设置到当前 session 的 connector 实例（即时生效）

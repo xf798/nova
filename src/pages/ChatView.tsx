@@ -4,6 +4,7 @@ import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
 import { buildSuggestions } from "../core/suggestions";
 import { chatAttachments } from "../core/chatAttachments";
+import { pendingModel } from "../core/pendingModel";
 import type { Suggestion } from "../core/suggestions";
 import type { QuotedMessage } from "../core/types";
 import { memoryManager } from "../core/memory";
@@ -168,6 +169,8 @@ function ChatView() {
           title: "新对话",
           connectorId: activeConnector.config.id,
           connectorSessionId: null,
+          // 与 ensureSession 一致：落地「新对话」空窗期选好的模型
+          modelId: pendingModel.take(),
         });
         store.setActiveSessionId(sessionId);
       }
@@ -253,24 +256,31 @@ function ChatView() {
     setHasMoreMessages(useSessionStore.getState().hasMoreMessages(activeSessionId));
   }, [activeSessionId]);
 
-  // 滚动与 reflow 必须跟随「实际渲染出来的内容」。
+  // 会话切换时立刻强制容器 reflow。
   //
-  // 若依赖非延迟的 messages，切换会话时它会在仍显示加载态的那一帧触发，
+  // 必须挂在 activeSessionId 上而非 deferredSessionId：切到新会话时
+  // isEmpty 会立刻切到欢迎页，而 deferredSessionId 仍是旧值，若 reflow 等它
+  // 更新才触发，WebView 会保留上一个会话的绘制内容 —— 表现为旧会话的消息
+  // 叠在欢迎页上方（已复现）。
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.style.display = "none";
+    // 读取 offsetHeight 强制 reflow
+    void el.offsetHeight;
+    el.style.display = "";
+  }, [activeSessionId]);
+
+  // 滚动到底部跟随「实际渲染出来的内容」。
+  //
+  // 若依赖非延迟的 messages，切换会话时它会在内容还没提交的那一帧触发，
   // 此时 messagesEndRef 还没挂载，滚动无效；而真正内容提交时依赖没变化，
   // 不会再触发一次 —— 结果是切换后停在顶部。
   useEffect(() => {
-    // 渲染出来的会话变了 → 强制滚到底部 + 触发容器 reflow
+    // 渲染出来的会话变了 → 视作需要停在底部
     if (prevSessionRef.current !== deferredSessionId) {
       prevSessionRef.current = deferredSessionId;
       isNearBottomRef.current = true;
-      // 强制容器 reflow（修复 WebView 在会话切换后不重新绘制的问题）
-      const el = scrollContainerRef.current;
-      if (el) {
-        el.style.display = "none";
-        // 读取 offsetHeight 强制 reflow
-        void el.offsetHeight;
-        el.style.display = "";
-      }
     }
 
     if (isNearBottomRef.current && renderMessages.length > 0) {
@@ -300,6 +310,9 @@ function ChatView() {
       title: "新对话",
       connectorId: activeConnector.config.id,
       connectorSessionId: null,
+      // 点「新对话」后、发消息前选的模型：那时还没有 session 可写，
+      // 暂存在 pendingModel 里，此刻作为初始值落地
+      modelId: pendingModel.take(),
     });
     useSessionStore.getState().setActiveSessionId(sessionId);
     return sessionId;
@@ -780,14 +793,20 @@ function ChatView() {
             )}
           </div>
         ) : showSwitchSpinner ? (
-          // 切换超过 150ms 仍未渲染完才给反馈；更快的切换直接沿用上一个会话
-          // 的内容过渡，避免每次切换都闪一下转圈（会被误认为在重新加载）
+          // 切换超过 150ms 仍未渲染完才给反馈；更快的切换走下面的空白过渡
           <div className="h-full flex flex-col items-center justify-center gap-3">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
               <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
             </svg>
             <span className="text-[13px] text-app-text-muted">加载会话…</span>
           </div>
+        ) : isSwitchingSession ? (
+          // 低优先级渲染进行中的空白过渡。
+          //
+          // 不能沿用 renderMessages 渲染——那是上一个会话的消息，会出现
+          // 「切到新会话却显示别的会话内容」（已复现）。空白 17-33ms
+          // 察觉不到，比显示错误内容或闪转圈都好。
+          <div className="h-full" />
         ) : (
           <div className="max-w-[760px] mx-auto py-6 px-4 space-y-4">
             {/* 显式入口：滚动触发不直观（惯性滚动常越过阈值），给个按钮更可控 */}

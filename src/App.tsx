@@ -7,6 +7,7 @@ import { connectorRegistry, disposeAllConnectors } from "./connectors";
 import type { Connector } from "./connectors";
 import { setNotificationHandler } from "./plugins";
 import { useSessionStore } from "./core/sessionStore";
+import { pendingModel } from "./core/pendingModel";
 import { useNovaTools } from "./hooks/useNovaTools";
 import { useMcpBridge } from "./hooks/useMcpBridge";
 import { useWecomBridge } from "./hooks/useWecomBridge";
@@ -145,6 +146,9 @@ function App() {
   };
 
   const handleSwitchSession = (sessionId: string) => {
+    // 清掉「新对话」空窗期选的模型：用户已经切走，那个选择不该串到
+    // 下一次新建的会话上
+    pendingModel.clear();
     useSessionStore.getState().switchSession(sessionId);
     setCurrentPage("chat");
   };
