@@ -209,8 +209,8 @@ function ChatView() {
 
   // 会话切换时立刻强制容器 reflow。
   //
-  // WebView 在会话切换后有时不重新绘制，会把上一个会话的内容留在画面上
-  // （已复现：旧会话消息叠在欢迎页上方）。强制一次 reflow 让它重画。
+  // 与上面的 key 是双重保险：key 保证 DOM 不复用，reflow 进一步促使
+  // WebView 丢弃旧内容的绘制。这个残留问题已复现两次，宁可多做一步。
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -220,11 +220,10 @@ function ChatView() {
     el.style.display = "";
   }, [activeSessionId]);
 
-  // 滚动到底部跟随「实际渲染出来的内容」。
+  // 切换会话或消息增长后滚到底部。
   //
-  // 若依赖非延迟的 messages，切换会话时它会在内容还没提交的那一帧触发，
-  // 此时 messagesEndRef 还没挂载，滚动无效；而真正内容提交时依赖没变化，
-  // 不会再触发一次 —— 结果是切换后停在顶部。
+  // 容器带 key 会在切换时重建，scrollTop 归零，因此这里必须在内容提交后
+  // 重新滚到底部，否则会停在顶部。
   useEffect(() => {
     // 渲染出来的会话变了 → 视作需要停在底部
     if (prevSessionRef.current !== activeSessionId) {
@@ -678,7 +677,13 @@ function ChatView() {
 
   return (
     <div className="flex flex-col h-full bg-app-bg">
-      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" ref={scrollContainerRef} onScroll={() => {
+      {/* key 按会话变化：强制 React 销毁并重建整个滚动子树。
+          WebView（WKWebView）在会话切换后有时不清除旧内容的绘制，表现为上一个
+          会话的消息残留在画面上、新内容画在它下面（已复现两次）。
+          仅靠 display:none 触发 reflow 不足以让合成层失效；换 key 拿到全新的
+          DOM 与图层，是更彻底的做法。
+          代价是不复用 DOM，但两个会话的消息 key 本就完全不同，原本也无从复用。 */}
+      <div key={activeSessionId ?? "__new__"} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" ref={scrollContainerRef} onScroll={() => {
         const el = scrollContainerRef.current;
         if (el) {
           isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
