@@ -28,6 +28,15 @@ interface QueuedItem {
 /** 输入队列单会话最大排队数 */
 const MAX_QUEUE_SIZE = 20;
 
+/**
+ * 切换会话多久没渲染完才显示转圈。
+ *
+ * 消息一直在内存里，切换耗时全在 React 挂载与代码高亮上；首屏 10 条时
+ * 多数会话 17-33ms 就完成，这种时长弹转圈只会让人误以为在重新加载。
+ * 取 150ms：低于此值沿用上一个会话的内容，视觉上等同瞬间切换。
+ */
+const SWITCH_SPINNER_DELAY_MS = 150;
+
 // 出队/队列触发发送时携带的上下文
 interface QueuedSend {
   targetSessionId: string;
@@ -182,18 +191,16 @@ function ChatView() {
 
   // ===== 会话切换的渲染降级 =====
   //
-  // 切到已加载过的长会话时，messages.map 会在一次同步提交里挂载 50 条消息
-  // （实测 154 条会话的首屏 264ms，含 174 个文本段 + 188 个工具事件），
+  // 切到已加载过的长会话时，messages.map 会在一次同步提交里挂载整页消息，
   // 界面硬冻且没有任何提示。而首次进入因为有 loading 态反而不觉得卡——
   // 同样的耗时，有反馈就能接受。
   //
   // 用 useDeferredValue 把「切换后的重渲染」降为可中断的低优先级任务：
-  // 切换瞬间先提交一帧（此时 deferredSessionId 仍是旧值 → 显示加载态），
-  // 随后 React 在后台渲染新会话，可在组件边界让出主线程。
-  // 单条消息最重 18.9ms，远低于卡顿阈值，交互不再冻结。
+  // 切换瞬间先提交一帧（此时 deferredSessionId 仍是旧值），随后 React 在
+  // 后台渲染新会话，可在组件边界让出主线程，交互不再冻结。
   //
   // 刻意 defer 的是 sessionId 而非 messages 数组：后者在流式输出时引用
-  // 持续变化，会让加载态不停闪烁。deferredSessionId 在同一会话内恒定，
+  // 持续变化，会让状态不停抖动。deferredSessionId 在同一会话内恒定，
   // 因此流式渲染完全不受影响。
   //
   // 注：startTransition 在这里无效——activeSessionId 来自 zustand，
@@ -202,6 +209,26 @@ function ChatView() {
   const isSwitchingSession = deferredSessionId !== activeSessionId;
   const renderMessages =
     sessions.find(s => s.id === deferredSessionId)?.messages || [];
+
+  // 转圈只在「切换确实慢」时才出现。
+  //
+  // 消息本身一直缓存在内存里（messagesLoaded 为 true 后不再读盘），切换耗时
+  // 全在 React 挂载与代码高亮上。首屏降到 10 条后多数会话只要 17-33ms，
+  // 这种时长弹转圈纯粹是闪屏——用户会误以为在重新加载。
+  //
+  // 因此延迟 SWITCH_SPINNER_DELAY_MS 再显示：期间沿用上一个会话的内容
+  // （stale-while-rendering），快的话根本看不到中间态，感觉就是瞬间切换；
+  // 慢的话才补上反馈。
+  const [showSwitchSpinner, setShowSwitchSpinner] = useState(false);
+  useEffect(() => {
+    if (!isSwitchingSession) {
+      setShowSwitchSpinner(false);
+      return;
+    }
+    const t = window.setTimeout(() => setShowSwitchSpinner(true), SWITCH_SPINNER_DELAY_MS);
+    return () => window.clearTimeout(t);
+  }, [isSwitchingSession]);
+
   // 区分「有历史正在加载」与「真的是空会话」：
   // 两者 messages 都为空，若不区分会在加载历史时闪出欢迎页
   const isHistoryLoading = !storeLoaded || (!!activeSession && !activeSession.messagesLoaded);
@@ -752,8 +779,9 @@ function ChatView() {
               </div>
             )}
           </div>
-        ) : isSwitchingSession ? (
-          // 切换到已加载的长会话：低优先级渲染进行中，先给反馈而不是冻住界面
+        ) : showSwitchSpinner ? (
+          // 切换超过 150ms 仍未渲染完才给反馈；更快的切换直接沿用上一个会话
+          // 的内容过渡，避免每次切换都闪一下转圈（会被误认为在重新加载）
           <div className="h-full flex flex-col items-center justify-center gap-3">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
               <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>

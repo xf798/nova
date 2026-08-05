@@ -16,19 +16,26 @@ function decide(input: {
   activeSessionId: string | null;
   deferredSessionId: string | null;
   sessions: Session[];
+  /** 切换已超过延迟阈值（150ms）仍未渲染完 */
+  showSwitchSpinner?: boolean;
 }): "loading" | "empty" | "switching" | "list" {
-  const { storeLoaded, activeSessionId, deferredSessionId, sessions } = input;
+  const { storeLoaded, activeSessionId, sessions } = input;
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const messages = activeSession?.messages || [];
 
   const isHistoryLoading = !storeLoaded || (!!activeSession && !activeSession.messagesLoaded);
   const isEmpty = !isHistoryLoading && messages.filter(m => m.role !== "system").length === 0;
-  const isSwitchingSession = deferredSessionId !== activeSessionId;
 
   if (isHistoryLoading) return "loading";
   if (isEmpty) return "empty";
-  if (isSwitchingSession) return "switching";
+  // 转圈只在超过延迟阈值后出现；此前沿用上一个会话的内容过渡
+  if (input.showSwitchSpinner) return "switching";
   return "list";
+}
+
+/** 复刻延迟转圈的状态机 */
+function spinnerAfter(isSwitching: boolean, elapsedMs: number, delayMs = 150): boolean {
+  return isSwitching && elapsedMs >= delayMs;
 }
 
 /** 复刻渲染用的消息来源 */
@@ -67,9 +74,20 @@ describe("分支优先级", () => {
       .toBe("empty");
   });
 
-  it("切到有内容的会话 → 切换中（低优先级渲染进行时给反馈）", () => {
-    expect(decide({ storeLoaded: true, activeSessionId: "B", deferredSessionId: "A", sessions }))
-      .toBe("switching");
+  it("切到有内容的会话且渲染够快 → 直接是列表，不闪转圈", () => {
+    // 消息一直缓存在内存里，切换只是重渲染；17-33ms 就完成的话
+    // 弹转圈会被误认为在重新加载
+    expect(decide({
+      storeLoaded: true, activeSessionId: "B", deferredSessionId: "A", sessions,
+      showSwitchSpinner: false,
+    })).toBe("list");
+  });
+
+  it("切换超过阈值仍未渲染完 → 才显示转圈", () => {
+    expect(decide({
+      storeLoaded: true, activeSessionId: "B", deferredSessionId: "A", sessions,
+      showSwitchSpinner: true,
+    })).toBe("switching");
   });
 
   it("切换完成 → 渲染列表", () => {
@@ -80,6 +98,23 @@ describe("分支优先级", () => {
   it("稳定状态下始终是列表，不会误判为切换中", () => {
     expect(decide({ storeLoaded: true, activeSessionId: "A", deferredSessionId: "A", sessions }))
       .toBe("list");
+  });
+});
+
+describe("延迟转圈的时序", () => {
+  it("阈值内不显示（快速切换感觉是瞬间的）", () => {
+    expect(spinnerAfter(true, 0)).toBe(false);
+    expect(spinnerAfter(true, 33)).toBe(false);
+    expect(spinnerAfter(true, 149)).toBe(false);
+  });
+
+  it("达到阈值才显示", () => {
+    expect(spinnerAfter(true, 150)).toBe(true);
+    expect(spinnerAfter(true, 400)).toBe(true);
+  });
+
+  it("没在切换时永不显示", () => {
+    expect(spinnerAfter(false, 999)).toBe(false);
   });
 });
 
