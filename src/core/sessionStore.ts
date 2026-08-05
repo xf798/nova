@@ -169,6 +169,41 @@ function debouncedSaveMeta(sessionId: string): void {
   saveTimers.set(key, timer);
 }
 
+/**
+ * 裁剪已离开会话的内存消息，只保留最近一页。
+ *
+ * 往上翻历史会把消息不断累积到内存里，而切回来时这些消息要全部重新挂载。
+ * 实测某个 165 条的会话：内存 20 条渲染 61ms，50 条 135ms，110 条 333ms，
+ * 165 条 457ms —— 翻过历史之后每次切回都付全额，且随翻页次数无上限增长。
+ *
+ * 裁掉后切回成本恒定在首屏那一页。代价是要重新点「加载更早的消息」，
+ * 但那是显式操作，比每次切换都变慢好。只动内存，磁盘上的 jsonl 不受影响。
+ */
+async function trimInactiveSession(sessionId: string): Promise<void> {
+  const keep = await sessionStorage.pageSizes()
+    .then(s => s.firstPage)
+    .catch(() => 20);
+  const state = useSessionStore.getState();
+  const target = state.sessions.find(s => s.id === sessionId);
+  if (!target || target.messages.length <= keep) return;
+
+  useSessionStore.setState(s => ({
+    sessions: s.sessions.map(x =>
+      x.id === sessionId ? { ...x, messages: x.messages.slice(-keep) } : x
+    ),
+    // loadedOffset 必须跟着回退，否则「加载更早」会从错误的位置继续取
+    pagination: s.pagination[sessionId]
+      ? {
+          ...s.pagination,
+          [sessionId]: {
+            ...s.pagination[sessionId],
+            loadedOffset: Math.min(s.pagination[sessionId].loadedOffset, keep),
+          },
+        }
+      : s.pagination,
+  }));
+}
+
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -305,7 +340,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   switchSession: async (sessionId) => {
+    const prevId = get().activeSessionId;
     set({ activeSessionId: sessionId });
+    // 先切再裁：裁剪只影响已经不显示的会话，不该拖慢切换本身
+    if (prevId && prevId !== sessionId) void trimInactiveSession(prevId);
 
     const session = get().sessions.find(s => s.id === sessionId);
     // 用 messagesLoaded 判断而非 messages.length：
@@ -383,7 +421,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     };
   },
 
-  setActiveSessionId: (id) => set({ activeSessionId: id }),
+  setActiveSessionId: (id) => {
+    const prevId = get().activeSessionId;
+    set({ activeSessionId: id });
+    // 点「新对话」走的是这条路（不经过 switchSession），同样要裁剪离开的会话，
+    // 否则切回去时仍要重新挂载它累积的全部消息
+    if (prevId && prevId !== id) void trimInactiveSession(prevId);
+  },
 
   hasMoreMessages: (sessionId) => {
     const pag = get().pagination[sessionId];
