@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useDeferredValue } from "react";
+import { useState, useRef, useEffect } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
@@ -28,15 +28,6 @@ interface QueuedItem {
 
 /** 输入队列单会话最大排队数 */
 const MAX_QUEUE_SIZE = 20;
-
-/**
- * 切换会话多久没渲染完才显示转圈。
- *
- * 消息一直在内存里，切换耗时全在 React 挂载与代码高亮上；首屏 10 条时
- * 多数会话 17-33ms 就完成，这种时长弹转圈只会让人误以为在重新加载。
- * 取 150ms：低于此值沿用上一个会话的内容，视觉上等同瞬间切换。
- */
-const SWITCH_SPINNER_DELAY_MS = 150;
 
 // 出队/队列触发发送时携带的上下文
 interface QueuedSend {
@@ -192,46 +183,6 @@ function ChatView() {
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const messages = activeSession?.messages || [];
 
-  // ===== 会话切换的渲染降级 =====
-  //
-  // 切到已加载过的长会话时，messages.map 会在一次同步提交里挂载整页消息，
-  // 界面硬冻且没有任何提示。而首次进入因为有 loading 态反而不觉得卡——
-  // 同样的耗时，有反馈就能接受。
-  //
-  // 用 useDeferredValue 把「切换后的重渲染」降为可中断的低优先级任务：
-  // 切换瞬间先提交一帧（此时 deferredSessionId 仍是旧值），随后 React 在
-  // 后台渲染新会话，可在组件边界让出主线程，交互不再冻结。
-  //
-  // 刻意 defer 的是 sessionId 而非 messages 数组：后者在流式输出时引用
-  // 持续变化，会让状态不停抖动。deferredSessionId 在同一会话内恒定，
-  // 因此流式渲染完全不受影响。
-  //
-  // 注：startTransition 在这里无效——activeSessionId 来自 zustand，
-  // React 不允许延后外部 store 的更新（tearing 风险）。
-  const deferredSessionId = useDeferredValue(activeSessionId);
-  const isSwitchingSession = deferredSessionId !== activeSessionId;
-  const renderMessages =
-    sessions.find(s => s.id === deferredSessionId)?.messages || [];
-
-  // 转圈只在「切换确实慢」时才出现。
-  //
-  // 消息本身一直缓存在内存里（messagesLoaded 为 true 后不再读盘），切换耗时
-  // 全在 React 挂载与代码高亮上。首屏降到 10 条后多数会话只要 17-33ms，
-  // 这种时长弹转圈纯粹是闪屏——用户会误以为在重新加载。
-  //
-  // 因此延迟 SWITCH_SPINNER_DELAY_MS 再显示：期间沿用上一个会话的内容
-  // （stale-while-rendering），快的话根本看不到中间态，感觉就是瞬间切换；
-  // 慢的话才补上反馈。
-  const [showSwitchSpinner, setShowSwitchSpinner] = useState(false);
-  useEffect(() => {
-    if (!isSwitchingSession) {
-      setShowSwitchSpinner(false);
-      return;
-    }
-    const t = window.setTimeout(() => setShowSwitchSpinner(true), SWITCH_SPINNER_DELAY_MS);
-    return () => window.clearTimeout(t);
-  }, [isSwitchingSession]);
-
   // 区分「有历史正在加载」与「真的是空会话」：
   // 两者 messages 都为空，若不区分会在加载历史时闪出欢迎页
   const isHistoryLoading = !storeLoaded || (!!activeSession && !activeSession.messagesLoaded);
@@ -258,10 +209,8 @@ function ChatView() {
 
   // 会话切换时立刻强制容器 reflow。
   //
-  // 必须挂在 activeSessionId 上而非 deferredSessionId：切到新会话时
-  // isEmpty 会立刻切到欢迎页，而 deferredSessionId 仍是旧值，若 reflow 等它
-  // 更新才触发，WebView 会保留上一个会话的绘制内容 —— 表现为旧会话的消息
-  // 叠在欢迎页上方（已复现）。
+  // WebView 在会话切换后有时不重新绘制，会把上一个会话的内容留在画面上
+  // （已复现：旧会话消息叠在欢迎页上方）。强制一次 reflow 让它重画。
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -278,23 +227,23 @@ function ChatView() {
   // 不会再触发一次 —— 结果是切换后停在顶部。
   useEffect(() => {
     // 渲染出来的会话变了 → 视作需要停在底部
-    if (prevSessionRef.current !== deferredSessionId) {
-      prevSessionRef.current = deferredSessionId;
+    if (prevSessionRef.current !== activeSessionId) {
+      prevSessionRef.current = activeSessionId;
       isNearBottomRef.current = true;
     }
 
-    if (isNearBottomRef.current && renderMessages.length > 0) {
+    if (isNearBottomRef.current && messages.length > 0) {
       requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
       });
     }
-  }, [deferredSessionId, renderMessages.length]);
+  }, [activeSessionId, messages.length]);
 
   useEffect(() => {
     if (isNearBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [renderMessages]);
+  }, [messages]);
 
   useEffect(() => {
     const paths = [...attachments];
@@ -347,21 +296,26 @@ function ChatView() {
   // 内容撑不满视口时自动补加载。
   //
   // 「加载更多」原本只由向上滚动（scrollTop < 100）触发，可是内容不足一屏时
-  // 根本没有滚动条，永远触发不了 —— 历史就再也看不到了。首屏从 50 条降到
-  // 10 条后这个风险变高（短消息多的会话 10 条可能才占半屏）。
+  // 根本没有滚动条，永远触发不了 —— 历史就再也看不到了。
   //
-  // 依赖渲染值：内容真正提交后才测量，否则量到的是加载态的高度。
+  // 每个会话最多自动补一次：补一次后仍不满屏就交给顶部按钮。
+  // 不设上限会级联——每补一次都是一次 IPC + 全量重渲染，
+  // 「渲染 10 条 → 渲染 40 条 → 渲染 70 条」的总开销远超一次渲染到位，
+  // 表现就是「消息多的会话反而变慢」。
+  const autoFilledRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!hasMoreMessages || isLoadingMore || isSwitchingSession) return;
+    if (!activeSessionId || !hasMoreMessages || isLoadingMore) return;
+    if (autoFilledRef.current.has(activeSessionId)) return;
     const el = scrollContainerRef.current;
     if (!el) return;
     // 留 8px 容差，避免因边框/圆整误差反复触发
     if (el.scrollHeight <= el.clientHeight + 8) {
+      autoFilledRef.current.add(activeSessionId);
       handleLoadMore();
     }
     // handleLoadMore 每次渲染都重建，放进依赖会导致重复触发
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderMessages.length, hasMoreMessages, isLoadingMore, isSwitchingSession]);
+  }, [activeSessionId, messages.length, hasMoreMessages, isLoadingMore]);
 
   const handleSend = async (text?: string, queued?: QueuedSend) => {
     console.log('[ChatView] ─── handleSend 开始 ───');
@@ -733,10 +687,6 @@ function ChatView() {
           }
         }
       }}>
-        {/* 判定顺序有讲究：
-            isEmpty 排在 isSwitchingSession 之前，因为它基于「目标会话」而非
-            渲染中的会话。这样点「新对话」时直接出欢迎页，不会先闪一下加载态
-            （空会话的渲染本来就是瞬时的，没必要等） */}
         {isHistoryLoading ? (
           <div className="h-full flex flex-col items-center justify-center gap-3">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
@@ -792,21 +742,6 @@ function ChatView() {
               </div>
             )}
           </div>
-        ) : showSwitchSpinner ? (
-          // 切换超过 150ms 仍未渲染完才给反馈；更快的切换走下面的空白过渡
-          <div className="h-full flex flex-col items-center justify-center gap-3">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="2" strokeLinecap="round" style={{ animation: "spin 2.5s linear infinite" }}>
-              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-            </svg>
-            <span className="text-[13px] text-app-text-muted">加载会话…</span>
-          </div>
-        ) : isSwitchingSession ? (
-          // 低优先级渲染进行中的空白过渡。
-          //
-          // 不能沿用 renderMessages 渲染——那是上一个会话的消息，会出现
-          // 「切到新会话却显示别的会话内容」（已复现）。空白 17-33ms
-          // 察觉不到，比显示错误内容或闪转圈都好。
-          <div className="h-full" />
         ) : (
           <div className="max-w-[760px] mx-auto py-6 px-4 space-y-4">
             {/* 显式入口：滚动触发不直观（惯性滚动常越过阈值），给个按钮更可控 */}
@@ -824,15 +759,14 @@ function ChatView() {
                 </button>
               </div>
             ) : null}
-            {/* 用 renderMessages 而非 messages：切换会话时降为低优先级渲染 */}
-            {renderMessages.map((msg, idx) => (
+            {messages.map((msg, idx) => (
               <MessageItem
                 key={msg.id}
                 message={msg}
                 onImageClick={(path) => setPreviewPanel({ type: 'image', data: path })}
                 onAddAttachment={(path) => setAttachments(prev => prev.includes(path) ? prev : [...prev, path])}
                 isSessionProcessing={isProcessing}
-                isLastMessage={idx === renderMessages.length - 1}
+                isLastMessage={idx === messages.length - 1}
                 onCopy={() => {
                   if (msg.content && msg.content !== "$$LOADING$$") {
                     navigator.clipboard.writeText(msg.content);
@@ -841,13 +775,13 @@ function ChatView() {
                 onRetry={async () => {
                   const sid = activeSessionId;
                   if (!sid) return;
-                  const msgsUpToHere = renderMessages.slice(0, idx);
+                  const msgsUpToHere = messages.slice(0, idx);
                   const lastUserMsg = [...msgsUpToHere].reverse().find(m => m.role === "user");
                   if (!lastUserMsg) return;
                   // 重试只对最后一轮有意义：删掉末尾这一问一答再重发。
                   // 走 dropTrailingMessages 而非 updateMessages —— 后者只做增量追加，
                   // 减少消息不会同步到磁盘，重发后历史里会残留旧的那一轮。
-                  const dropCount = renderMessages.length - renderMessages.indexOf(lastUserMsg);
+                  const dropCount = messages.length - messages.indexOf(lastUserMsg);
                   await useSessionStore.getState().dropTrailingMessages(sid, dropCount);
                   handleSend(lastUserMsg.content);
                 }}

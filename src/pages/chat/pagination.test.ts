@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "vitest";
 
-const SIZES = { firstPage: 10, loadMore: 30 };
+const SIZES = { firstPage: 20, loadMore: 30 };
 
 /** 复刻 sessionStorage.loadMessages 的页大小选择 */
 function pickLimit(offset: number, limit: number | undefined, sizes = SIZES): number {
@@ -26,10 +26,9 @@ function shouldAutoFill(input: {
   clientHeight: number;
   hasMore: boolean;
   isLoading: boolean;
-  isSwitching: boolean;
 }): boolean {
-  const { scrollHeight, clientHeight, hasMore, isLoading, isSwitching } = input;
-  if (!hasMore || isLoading || isSwitching) return false;
+  const { scrollHeight, clientHeight, hasMore, isLoading } = input;
+  if (!hasMore || isLoading) return false;
   return scrollHeight <= clientHeight + 8;
 }
 
@@ -41,11 +40,11 @@ function restoredScrollTop(prevTop: number, prevHeight: number, newHeight: numbe
 
 describe("页大小选择", () => {
   it("首屏用小页（offset=0）", () => {
-    expect(pickLimit(0, undefined)).toBe(10);
+    expect(pickLimit(0, undefined)).toBe(20);
   });
 
   it("往上翻历史用大页", () => {
-    expect(pickLimit(10, undefined)).toBe(30);
+    expect(pickLimit(20, undefined)).toBe(30);
     expect(pickLimit(40, undefined)).toBe(30);
   });
 
@@ -63,55 +62,49 @@ describe("自动补加载", () => {
   it("内容撑不满视口且有更多 → 补加载", () => {
     expect(shouldAutoFill({
       scrollHeight: 400, clientHeight: 800,
-      hasMore: true, isLoading: false, isSwitching: false,
+      hasMore: true, isLoading: false,
     })).toBe(true);
   });
 
   it("内容刚好等于视口高度也补（否则没有可滚动空间）", () => {
     expect(shouldAutoFill({
       scrollHeight: 800, clientHeight: 800,
-      hasMore: true, isLoading: false, isSwitching: false,
+      hasMore: true, isLoading: false,
     })).toBe(true);
   });
 
   it("内容已超出视口 → 不补，交给滚动触发", () => {
     expect(shouldAutoFill({
       scrollHeight: 2000, clientHeight: 800,
-      hasMore: true, isLoading: false, isSwitching: false,
+      hasMore: true, isLoading: false,
     })).toBe(false);
   });
 
   it("8px 容差内不反复触发（边框/圆整误差）", () => {
     expect(shouldAutoFill({
       scrollHeight: 806, clientHeight: 800,
-      hasMore: true, isLoading: false, isSwitching: false,
+      hasMore: true, isLoading: false,
     })).toBe(true);
     expect(shouldAutoFill({
       scrollHeight: 809, clientHeight: 800,
-      hasMore: true, isLoading: false, isSwitching: false,
+      hasMore: true, isLoading: false,
     })).toBe(false);
   });
 
   it("没有更多历史时不补", () => {
     expect(shouldAutoFill({
       scrollHeight: 100, clientHeight: 800,
-      hasMore: false, isLoading: false, isSwitching: false,
+      hasMore: false, isLoading: false,
     })).toBe(false);
   });
 
   it("正在加载时不重复触发", () => {
     expect(shouldAutoFill({
       scrollHeight: 100, clientHeight: 800,
-      hasMore: true, isLoading: true, isSwitching: false,
+      hasMore: true, isLoading: true,
     })).toBe(false);
   });
 
-  it("会话切换中不触发（此时量到的是加载态高度）", () => {
-    expect(shouldAutoFill({
-      scrollHeight: 100, clientHeight: 800,
-      hasMore: true, isLoading: false, isSwitching: true,
-    })).toBe(false);
-  });
 });
 
 describe("滚动位置补偿", () => {
