@@ -34,22 +34,38 @@ const ASSET_BASE: &str =
 pub struct Asset {
     pub name: &'static str,
     pub sha256: &'static str,
+    /// 预期字节数。
+    ///
+    /// 状态检查只比对体积，不算哈希：对 47MB 算 sha256 要 106ms，
+    /// 而 embedding_status 会被 UI 频繁调用，同步阻塞主线程会让设置页卡住
+    /// （已实际踩到）。完整校验只在下载后做，那里才需要防篡改。
+    pub size: u64,
 }
 
 pub const ASSETS: &[Asset] = &[
     Asset {
         name: "model.onnx",
         sha256: "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc",
+        size: 24010842,
     },
     Asset {
         name: "tokenizer.json",
         sha256: "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
+        size: 439125,
     },
     Asset {
         name: "libonnxruntime.dylib",
         sha256: "530cdb5a0de774677d369a83ec8912b0242e9769acd12d34b61412ee6ae368ae",
+        size: 25477864,
     },
 ];
+
+/// 廉价存在性检查：只看体积。供状态展示与引擎加载前的快速判断。
+fn asset_present(a: &Asset) -> bool {
+    std::fs::metadata(asset_path(a.name))
+        .map(|m| m.len() == a.size)
+        .unwrap_or(false)
+}
 
 pub fn models_dir() -> PathBuf {
     crate::data_dir().join("models")
@@ -63,11 +79,9 @@ pub fn asset_path(name: &str) -> PathBuf {
     models_dir().join(name)
 }
 
-/// 三个文件是否都已就位且校验通过
+/// 三个文件是否都已就位（按体积快速判断，不算哈希）
 pub fn assets_ready() -> bool {
-    ASSETS
-        .iter()
-        .all(|a| crate::downloader::is_valid(&asset_path(a.name), a.sha256))
+    ASSETS.iter().all(asset_present)
 }
 
 // ===== 推理会话 =====
@@ -240,15 +254,16 @@ pub fn save_store(store: &VectorStore) -> Result<(), String> {
 // ===== Tauri 命令 =====
 
 /// 语义召回是否可用（资产齐备）
+/// 状态查询。声明为 async 让它离开主线程，避免任何 IO 阻塞界面。
 #[tauri::command]
-pub fn embedding_status() -> serde_json::Value {
+pub async fn embedding_status() -> serde_json::Value {
     let files: Vec<serde_json::Value> = ASSETS
         .iter()
         .map(|a| {
             let p = asset_path(a.name);
             serde_json::json!({
                 "name": a.name,
-                "ready": crate::downloader::is_valid(&p, a.sha256),
+                "ready": asset_present(a),
                 "size": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
             })
         })
@@ -280,7 +295,7 @@ pub async fn download_embedding_model(app: tauri::AppHandle) -> Result<(), Strin
 
 /// 删除已下载的模型资产与索引
 #[tauri::command]
-pub fn remove_embedding_model() -> Result<(), String> {
+pub async fn remove_embedding_model() -> Result<(), String> {
     for a in ASSETS {
         let p = asset_path(a.name);
         if p.exists() {
@@ -299,8 +314,10 @@ pub fn remove_embedding_model() -> Result<(), String> {
 }
 
 /// 为给定记忆建立/补齐索引。只编码缺失的条目。
+///
+/// async：100 条记忆全量编码实测 2.39s，同步命令会把界面冻住整整两秒。
 #[tauri::command]
-pub fn index_memories(items: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
+pub async fn index_memories(items: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
     let mut store = load_store();
     let model_tag = "bge-small-zh-v1.5-int8";
     // 换模型后旧向量不可比，全部作废
@@ -351,8 +368,11 @@ pub fn index_memories(items: Vec<serde_json::Value>) -> Result<serde_json::Value
 }
 
 /// 语义检索：返回 id → 相似度
+///
+/// async：单条查询编码虽只要 1ms，但首次调用会触发 47ms 冷启动加载，
+/// 且这条路径在每次发消息时都会走，不该占用主线程。
 #[tauri::command]
-pub fn semantic_search(query: String, top_k: Option<usize>) -> Result<serde_json::Value, String> {
+pub async fn semantic_search(query: String, top_k: Option<usize>) -> Result<serde_json::Value, String> {
     if query.trim().is_empty() {
         return Ok(serde_json::json!({ "hits": [] }));
     }
@@ -524,6 +544,37 @@ mod quality_tests {
                 println!("     {:.3} [{}] {}", s, cat, preview);
             }
             println!();
+        }
+    }
+}
+
+#[cfg(test)]
+mod status_perf_tests {
+    use super::*;
+
+    #[test]
+    fn asset_present_is_cheap() {
+        if !assets_ready() { println!("跳过：资产未就绪"); return; }
+        // 状态检查会被 UI 频繁调用，必须廉价。
+        // 对照：对同样 47MB 算 sha256 实测 106ms。
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = assets_ready();
+        }
+        let per = t.elapsed().as_micros() / 50;
+        println!("  assets_ready 单次 {} 微秒", per);
+        assert!(per < 5000, "状态检查应在 5ms 内，实际 {} 微秒", per);
+    }
+
+    #[test]
+    fn full_verification_still_available_for_download_path() {
+        if !assets_ready() { return; }
+        // 下载路径仍走完整 sha256，防篡改不能省
+        for a in ASSETS {
+            assert!(
+                crate::downloader::is_valid(&asset_path(a.name), a.sha256),
+                "{} 完整校验应通过", a.name
+            );
         }
     }
 }
