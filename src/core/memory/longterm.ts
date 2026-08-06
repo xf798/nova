@@ -5,8 +5,9 @@
 // 在 buildContext 时注入为 system 上下文前缀。
 
 import { StorageService } from "../storage";
-import { smartRecall } from "./recall";
+import { smartRecall, getRecallConfig } from "./recall";
 import { shouldRecall } from "./recallGate";
+import { semanticSearch, fuseScores } from "./semantic";
 import type { RecallContext, ScoredMemory } from "./recall";
 
 /** 记忆分类 */
@@ -184,7 +185,7 @@ class LongTermMemoryStore {
     const variable = memories.filter(m => m.category !== "user_preference");
     if (variable.length === 0) return null;
 
-    const recalled = await smartRecall(query, variable, context);
+    const recalled = await this.recallFused(query, variable, context);
     console.log(`[Memory LT] buildVariableContext: query="${query.slice(0, 40)}" | variable记忆=${variable.length}条 | 回忆命中=${recalled.length}条`);
     if (recalled.length === 0) return null;
 
@@ -206,6 +207,50 @@ class LongTermMemoryStore {
   }
 
   /**
+   * 召回（语义 + 关键词融合，语义不可用时自动降级）。
+   *
+   * 语义召回的价值实测有据：「切换会话卡顿是怎么解决的」能命中
+   * 「首屏20条+翻页30条…」（0.622），而这两句几乎没有共同词，
+   * 词面匹配完全做不到。
+   *
+   * 保留关键词分量是因为两者互补：精确的专有名词（minisign、commit hash）
+   * 向量模型未必编码得好，关键词匹配对这类最强。
+   */
+  private async recallFused(
+    query: string,
+    variable: LongTermMemory[],
+    context?: RecallContext,
+  ): Promise<ScoredMemory[]> {
+    const keywordResults = await smartRecall(query, variable, context);
+
+    // 语义侧：未启用/未就绪时返回空，此时结果等同纯关键词
+    const semanticHits = await semanticSearch(query, 10);
+    if (semanticHits.length === 0) return keywordResults;
+
+    const semanticById = new Map(semanticHits.map(h => [h.id, h.score]));
+    const keywordById = new Map(keywordResults.map(r => [r.memory.id, r.score]));
+    const byId = new Map(variable.map(m => [m.id, m]));
+
+    // 两侧命中取并集：语义能捞到词面不命中的，反之亦然
+    const ids = new Set([...semanticById.keys(), ...keywordById.keys()]);
+    const fused: ScoredMemory[] = [];
+    for (const id of ids) {
+      const mem = byId.get(id);
+      if (!mem) continue;
+      fused.push({
+        memory: mem,
+        score: fuseScores(semanticById.get(id), keywordById.get(id) ?? 0),
+      });
+    }
+    fused.sort((a, b) => b.score - a.score);
+    const top = fused.slice(0, getRecallConfig().maxResults);
+    console.log(
+      `[Nova:Memory] 融合召回: 语义 ${semanticHits.length} 条 + 关键词 ${keywordResults.length} 条 → ${top.length} 条`,
+    );
+    return top;
+  }
+
+  /**
    * 获取智能回忆结果（带分数，供 UI 展示）
    *
    * 返回 variable 层的回忆结果（不含 user_preference，那些在 stable 层）。
@@ -217,7 +262,7 @@ class LongTermMemoryStore {
     const memories = await this.ensureLoaded();
     const variable = memories.filter(m => m.category !== "user_preference");
     if (variable.length === 0) return [];
-    const results = await smartRecall(query, variable, context);
+    const results = await this.recallFused(query, variable, context);
     console.log(`[Nova:Memory] getRecalledMemories: query="${query.slice(0, 40)}", 搜索范围=${variable.length}, 返回结果数=${results.length}`);
     return results;
   }

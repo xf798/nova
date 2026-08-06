@@ -51,6 +51,27 @@ if [ -n "$(git status --porcelain)" ]; then
   die "工作区有未提交改动，请先提交或暂存"
 fi
 
+# 四处版本号必须一致。
+#
+# release.sh 只改 tauri.conf.json，其余三处靠手工同步，实际漏过：
+# 0.1.5 和 0.1.6 两次发版 Cargo.toml 都停在 0.1.4，直到 0.1.7 才发现。
+# tauri.conf.json 是 updater 的比较依据，不一致会让版本判断与实际不符。
+check_versions() {
+  local conf pkg cargo lock
+  conf="$(node -e "console.log(require('$CONF').version)")"
+  pkg="$(node -e "console.log(require('$ROOT/package.json').version)")"
+  cargo="$(grep -m1 '^version' "$ROOT/src-tauri/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+  lock="$(node -e "
+    const s=require('fs').readFileSync('$ROOT/src-tauri/Cargo.lock','utf8');
+    const m=s.match(/name = \"nova\"\nversion = \"([^\"]+)\"/);
+    console.log(m ? m[1] : 'NOT_FOUND');
+  ")"
+  if [ "$conf" != "$pkg" ] || [ "$conf" != "$cargo" ] || [ "$conf" != "$lock" ]; then
+    die "版本号不一致：tauri.conf=$conf package.json=$pkg Cargo.toml=$cargo Cargo.lock=$lock"
+  fi
+  info "版本号四处一致: $conf"
+}
+
 # ── 2. 版本号 ──
 if [ -n "$NEW_VERSION" ]; then
   echo "$NEW_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -68,6 +89,9 @@ VERSION="$(node -e "console.log(require('$CONF').version)")"
 [ -n "$VERSION" ] || die "无法从 tauri.conf.json 读取版本号"
 TAG="v$VERSION"
 info "发布版本: $VERSION (tag=$TAG)"
+
+# 版本号写定后校验四处一致（NEW_VERSION 只改了 tauri.conf.json）
+check_versions
 
 if [ "$DRY_RUN" -eq 0 ] && gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
   die "Release $TAG 已存在于 $RELEASE_REPO，请换版本号"
@@ -108,8 +132,15 @@ NOTES="$(git log -1 --pretty=%s)"
 LATEST_JSON="$BUNDLE_DIR/latest.json"
 
 info "生成 latest.json (platform=$PLATFORM)"
+# 下载地址走加速代理。
+#
+# GitHub 直连实测只有 21KB/s（自己的仓库也一样，是整体带宽问题），
+# 10MB 的更新包要下 8 分钟；经 gh-proxy 实测 4.6MB/s，几秒完成。
+# 代理下载的文件 sha256 与官方完全一致，且 updater 本身会用 minisign
+# 验签，代理只是传输通道，被篡改也过不了验签。
+GH_URL="https://github.com/$RELEASE_REPO/releases/download/$TAG/$(basename "$APP_TARGZ")"
 SIGNATURE="$(cat "$APP_SIG")" \
-DL_URL="https://github.com/$RELEASE_REPO/releases/download/$TAG/$(basename "$APP_TARGZ")" \
+DL_URL="https://gh-proxy.com/$GH_URL" \
 NOTES="$NOTES" \
 node -e "
   const fs=require('fs');
@@ -148,5 +179,20 @@ info "✅ 发布完成"
 echo "    Release : https://github.com/$RELEASE_REPO/releases/tag/$TAG"
 echo "    更新源  : https://github.com/$RELEASE_REPO/releases/latest/download/latest.json"
 echo
-echo "验证更新源可达（应返回 200 且是刚发布的版本）:"
-echo "    curl -sL https://github.com/$RELEASE_REPO/releases/latest/download/latest.json | head -20"
+
+# 自动验证 latest 别名指向本次发布。
+#
+# 曾因为往 nova-releases 传了个非版本 release（models-v1）而抢占 latest 别名，
+# 导致所有客户端更新检查 404。这里主动确认一次，避免同类问题静默发生。
+# CDN 有缓存，给它一点时间。
+info "验证更新源"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 6
+  GOT="$(curl -sL -m 20 "https://github.com/$RELEASE_REPO/releases/latest/download/latest.json" 2>/dev/null \
+    | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).version)}catch(e){console.log('')}})" 2>/dev/null)"
+  if [ "$GOT" = "$VERSION" ]; then
+    info "更新源已指向 $VERSION"
+    break
+  fi
+  [ "$i" -eq 10 ] && echo "  ⚠ 更新源仍未指向 $VERSION（当前: ${GOT:-无法读取}）。若仓库里有非版本 release，需把它标为 prerelease。"
+done

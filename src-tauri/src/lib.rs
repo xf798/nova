@@ -1,4 +1,6 @@
 mod models;
+mod downloader;
+mod embedding;
 mod mcp_server;
 mod wecom;
 mod coding_tools;
@@ -536,7 +538,7 @@ fn parse_skill_description(path: &PathBuf) -> String {
     String::new()
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
         .join(".nova")
@@ -950,7 +952,7 @@ fn migrate_all_sessions() {
 
 
 /// Atomic write: write to temp file then rename for crash safety.
-fn atomic_write(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
+pub fn atomic_write(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
     let mut file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
@@ -1919,6 +1921,11 @@ pub fn run() {
             rewrite_session_messages,
             drop_trailing_session_messages,
             search_session_messages,
+            embedding::embedding_status,
+            embedding::download_embedding_model,
+            embedding::remove_embedding_model,
+            embedding::index_memories,
+            embedding::semantic_search,
             write_partial_message,
             clear_partial_message,
             delete_session,

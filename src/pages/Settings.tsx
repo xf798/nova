@@ -25,6 +25,7 @@ import {
 } from "../core/updater";
 import type { DistillConfig } from "../core/distill";
 import { DEFAULT_DISTILL_CONFIG } from "../core/distill";
+import SemanticSettings from "./settings/SemanticSettings";
 
 const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
@@ -385,6 +386,11 @@ function Settings() {
               )}
             </div>
           </div>
+
+            {/* 语义召回：模型按需下载，不打进应用包 */}
+            <div className="mt-4 pt-4 border-t border-app-border">
+              <SemanticSettings />
+            </div>
         </Section>
 
         {/* Skill 系统 */}
