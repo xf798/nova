@@ -28,8 +28,19 @@ interface Marks {
 
 let current: Marks | null = null;
 
-/** 是否开启测量。改为 true 后重启 dev 生效 */
-const ENABLED = true;
+/**
+ * 是否开启测量。
+ *
+ * 默认关闭：每次切换会多一次 IPC 与一次日志写入。
+ * 需要排查切换慢时改为 true 并重启 dev，随后读 ~/.nova/logs/frontend.log
+ * 里的 [SWITCH] 行 —— 关键是看 commit（React 挂载）与 paint（浏览器绘制）
+ * 哪个占大头，两者的解法完全不同。
+ *
+ * 这套测量的价值已被验证过一次：当时连续三轮都在优化消息条数，
+ * 而实测显示同样 20 条的会话耗时能差 10 倍，真正的变量是单条内容密度；
+ * 其中一个会话的瓶颈甚至在 paint 而非 commit，光看代码推断不出来。
+ */
+const ENABLED = false;
 
 export function markClick(sessionId: string, cached: boolean): void {
   if (!ENABLED) return;
