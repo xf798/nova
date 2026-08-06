@@ -15,7 +15,7 @@ import { describe, it, expect, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
-const { fuseRanked, semanticSearch, SEMANTIC_THRESHOLD, SEMANTIC_WEIGHT } =
+const { fuseRanked, semanticSearch, hasLexicalAnchor, SEMANTIC_THRESHOLD, SEMANTIC_WEIGHT } =
   await import("./semantic");
 
 describe("阈值", () => {
@@ -102,5 +102,60 @@ describe("semanticSearch 阈值过滤", () => {
     invoke.mockClear();
     invoke.mockRejectedValue(new Error("推理失败"));
     expect(await semanticSearch("查询")).toEqual([]);
+  });
+});
+
+describe("词面锚点过滤", () => {
+  // 小模型抓话题强、分主语弱：「之前那个切换慢是怎么弄的」召回到
+  // 「录音mode2修复方案简化」(0.590) 与正确答案(0.599) 仅差 0.009，
+  // 两者都在讲「某问题怎么修的」。这种差距调阈值解决不了。
+  it("主语相同则保留", () => {
+    expect(hasLexicalAnchor(
+      "之前那个切换慢是怎么弄的",
+      "Nova会话切换性能方案：首屏20条+翻页30条",
+    )).toBe(true);
+  });
+
+  it("话题相近但主语不同则拦截", () => {
+    expect(hasLexicalAnchor(
+      "之前那个切换慢是怎么弄的",
+      "录音mode2修复方案简化：15秒回查机制可以整个砍掉",
+    )).toBe(false);
+  });
+
+  it("英文技术名词整体作为锚点", () => {
+    expect(hasLexicalAnchor("JSONL 迁移怎么做的", "会话存储已迁移到 jsonl 格式")).toBe(true);
+  });
+
+  it("无实义片段时不过滤（交给闸门处理）", () => {
+    expect(hasLexicalAnchor("做吧", "任意内容")).toBe(true);
+  });
+
+  it("空查询不过滤", () => {
+    expect(hasLexicalAnchor("", "任意内容")).toBe(true);
+  });
+
+  it("大小写不敏感", () => {
+    expect(hasLexicalAnchor("rehypeHighlight 慢", "用 REHYPEHIGHLIGHT 做高亮")).toBe(true);
+  });
+
+  it("不传 contents 时跳过锚点过滤", async () => {
+    invoke.mockClear();
+    invoke.mockResolvedValue({ hits: [{ id: "a", score: 0.7 }] });
+    const r = await semanticSearch("切换慢");
+    expect(r).toHaveLength(1);
+  });
+
+  it("传 contents 时按锚点过滤", async () => {
+    invoke.mockClear();
+    invoke.mockResolvedValue({
+      hits: [{ id: "keep", score: 0.7 }, { id: "drop", score: 0.7 }],
+    });
+    const contents = new Map([
+      ["keep", "会话切换性能方案"],
+      ["drop", "录音修复方案"],
+    ]);
+    const r = await semanticSearch("切换慢是怎么弄的", 10, contents);
+    expect(r.map(h => h.id)).toEqual(["keep"]);
   });
 });

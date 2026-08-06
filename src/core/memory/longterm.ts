@@ -224,7 +224,9 @@ class LongTermMemoryStore {
     const keywordResults = await smartRecall(query, variable, context);
 
     // 语义侧：未启用/未就绪时返回空，此时结果等同纯关键词
-    const semanticHits = await semanticSearch(query, 10);
+    // 传入正文用于词面锚点过滤：挡掉「话题相近但主语不同」的候选
+    const contents = new Map(variable.map(m => [m.id, m.content]));
+    const semanticHits = await semanticSearch(query, 10, contents);
     if (semanticHits.length === 0) return keywordResults;
 
     // 用排名融合而非分数加权：两侧分数量纲不同，加权会让关键词命中
