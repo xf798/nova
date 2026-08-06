@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { DEFAULT_WECOM_POLICY, parseWecomPolicy } from "../../core/wecomPolicy";
 import type { Connector, ConnectorConfig, ConnectorCapabilities, SendOptions, SendResult } from "../base";
 
 export type WeComBotStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -37,6 +38,7 @@ export class WeComBotConnector implements Connector {
       botSecret: config?.botSecret || "",
       botName: config?.botName || "",
       autoConnect: config?.autoConnect ?? true,
+      wecomPolicy: config?.wecomPolicy ? parseWecomPolicy(config.wecomPolicy) : { ...DEFAULT_WECOM_POLICY },
     };
 
     // 启动状态监听
@@ -146,6 +148,7 @@ export class WeComBotConnector implements Connector {
       data.wecom_secret = this.config.botSecret;
       data.wecom_bot_name = this.config.botName;
       data.wecom_auto_connect = this.config.autoConnect;
+      data.wecom_policy = this.config.wecomPolicy || DEFAULT_WECOM_POLICY;
       await invoke("save_app_storage", { data: JSON.stringify(data) });
     } catch (e) {
       console.error("[WeComBot] 持久化配置失败:", e);
@@ -161,6 +164,8 @@ export class WeComBotConnector implements Connector {
       if (data.wecom_secret) (this.config as any).botSecret = data.wecom_secret;
       if (data.wecom_bot_name) (this.config as any).botName = data.wecom_bot_name;
       if (data.wecom_auto_connect !== undefined) (this.config as any).autoConnect = data.wecom_auto_connect;
+      // 策略缺失时保持默认（所有人可用 + 四类高危全拦），不因旧存储放开权限
+      (this.config as any).wecomPolicy = parseWecomPolicy(data.wecom_policy);
     } catch {
       // 忽略
     }

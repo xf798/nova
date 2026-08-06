@@ -1,7 +1,12 @@
 // ===== 连接器表单组件 =====
 // 统一处理 API / CLI / Bot 三种类型的表单渲染，支持新增和编辑两种模式。
 
+import { useState } from "react";
 import type { BotPlatform } from "../../connectors";
+import {
+  DEFAULT_WECOM_POLICY, GUARD_CATEGORIES, getRecentSenders,
+  type GuardCategory, type WecomPolicy,
+} from "../../core/wecomPolicy";
 
 // ─── 表单数据类型 ───
 
@@ -29,6 +34,8 @@ export interface BotFormData {
   botId: string;
   secret: string;
   autoConnect: boolean;
+  /** 访问策略（仅企微生效） */
+  policy: WecomPolicy;
 }
 
 // ─── 输入框样式常量 ───
@@ -173,6 +180,159 @@ export function CliForm({ data, onChange, onSubmit, onCancel, isEdit }: {
   );
 }
 
+// ─── 开关 ───
+
+function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      role="switch"
+      aria-checked={on}
+      className={`relative shrink-0 w-8 h-[18px] rounded-full transition-colors ${on ? 'bg-[#10a37f]' : 'bg-app-border'}`}
+    >
+      <span className={`absolute top-[2px] w-[14px] h-[14px] bg-white rounded-full shadow transition-transform ${on ? 'left-[14px]' : 'left-[2px]'}`}></span>
+    </button>
+  );
+}
+
+// ─── 企微访问策略面板 ───
+//
+// 机器人分享给他人后，任何能 @ 到它的人都能驱动本机 AI。
+// 这里把权限做成两层可见配置：访问范围（谁能用）+ 高危能力（能做什么）。
+
+export function WecomPolicyPanel({ policy, onChange }: {
+  policy: WecomPolicy;
+  onChange: (p: WecomPolicy) => void;
+}) {
+  const [userInput, setUserInput] = useState("");
+  // 只在面板挂载时取一次，避免每次渲染都读 localStorage
+  const [recent] = useState(() => getRecentSenders());
+
+  const addUser = (v: string) => {
+    const name = v.trim();
+    if (!name) return;
+    if (policy.allowedUsers.some(u => u.toLowerCase() === name.toLowerCase())) return;
+    onChange({ ...policy, allowedUsers: [...policy.allowedUsers, name] });
+  };
+
+  const removeUser = (v: string) => {
+    onChange({ ...policy, allowedUsers: policy.allowedUsers.filter(u => u !== v) });
+  };
+
+  const toggleGuard = (cat: GuardCategory) => {
+    const off = policy.disabledGuards.includes(cat);
+    onChange({
+      ...policy,
+      disabledGuards: off
+        ? policy.disabledGuards.filter(c => c !== cat)
+        : [...policy.disabledGuards, cat],
+    });
+  };
+
+  const isAllowlist = policy.accessMode === "allowlist";
+  // 候选：最近发言过、且还没在名单里的人
+  const candidates = recent.filter(
+    s => !policy.allowedUsers.some(u => u.toLowerCase() === s.senderName.toLowerCase() || u === s.senderId)
+  );
+
+  return (
+    <div className="pt-3 border-t border-app-border space-y-3">
+      <div>
+        <span className={labelCls}>使用范围</span>
+        <div className="flex gap-2">
+          {([
+            { key: "everyone" as const, label: "所有人" },
+            { key: "allowlist" as const, label: "仅指定成员" },
+          ]).map(m => (
+            <button
+              key={m.key}
+              onClick={() => onChange({ ...policy, accessMode: m.key })}
+              className={`px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-colors ${
+                policy.accessMode === m.key
+                  ? "border-[#10a37f] bg-[#10a37f]/10 text-[#10a37f]"
+                  : "border-app-border text-app-text-muted hover:border-app-text-muted"
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] text-app-text-muted mt-1 leading-relaxed">
+          {isAllowlist
+            ? "只有名单内成员的消息会被处理，其他人收到未授权提示。"
+            : "任何能 @ 到机器人的人都能使用它驱动本机 AI。"}
+        </p>
+      </div>
+
+      {isAllowlist && (
+        <div>
+          <span className={labelCls}>授权成员（企微姓名或成员 ID）</span>
+          {policy.allowedUsers.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {policy.allowedUsers.map(u => (
+                <span key={u} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-app-surface-hover text-[11px] text-app-text">
+                  {u}
+                  <button onClick={() => removeUser(u)} aria-label={`移除 ${u}`} className="text-app-text-muted hover:text-app-text">×</button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <input
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addUser(userInput); setUserInput(""); } }}
+              placeholder="输入姓名后回车添加"
+              className={inputCls}
+            />
+            <button onClick={() => { addUser(userInput); setUserInput(""); }} className={btnSecondary}>添加</button>
+          </div>
+          {candidates.length > 0 && (
+            <div className="mt-2">
+              <p className="text-[10px] text-app-text-muted mb-1">最近发言人（点击加入名单）</p>
+              <div className="flex flex-wrap gap-1.5">
+                {candidates.map(s => (
+                  <button
+                    key={s.senderId}
+                    onClick={() => addUser(s.senderName || s.senderId)}
+                    className="px-2 py-0.5 rounded-md border border-app-border text-[11px] text-app-text-muted hover:text-app-text hover:border-app-text-muted transition-colors"
+                  >
+                    + {s.senderName || s.senderId}{s.blocked ? " ⛔" : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {policy.allowedUsers.length === 0 && (
+            <p className="text-[10px] text-[#d9822b] mt-1.5">名单为空，当前没有人能使用这个机器人。</p>
+          )}
+        </div>
+      )}
+
+      <div>
+        <span className={labelCls}>敏感操作拦截</span>
+        <div className="space-y-1.5">
+          {GUARD_CATEGORIES.map(c => {
+            const on = !policy.disabledGuards.includes(c.key);
+            return (
+              <div key={c.key} className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[12px] text-app-text-secondary">{c.label}</p>
+                  <p className="text-[10px] text-app-text-muted leading-relaxed">{c.desc}</p>
+                </div>
+                <Toggle on={on} onClick={() => toggleGuard(c.key)} />
+              </div>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-app-text-muted mt-1.5 leading-relaxed">
+          开启表示拦截该类指令。关闭意味着企微那头的人可以让 AI 直接操作本机，仅在机器人只有自己使用时才建议关闭。
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ─── Bot 表单 ───
 
 export function BotForm({ data, onChange, onSubmit, onCancel, isEdit, submitLabel }: {
@@ -217,14 +377,15 @@ export function BotForm({ data, onChange, onSubmit, onCancel, isEdit, submitLabe
         <label className={labelCls}>Secret</label>
         <input type="password" value={data.secret} onChange={(e) => onChange({ ...data, secret: e.target.value })} placeholder="Secret..." className={inputCls} />
       </div>
+      {data.platform === "wecom" && (
+        <WecomPolicyPanel
+          policy={data.policy || DEFAULT_WECOM_POLICY}
+          onChange={(p) => onChange({ ...data, policy: p })}
+        />
+      )}
       <div className="flex items-center justify-between">
         <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none">
-          <button
-            onClick={() => onChange({ ...data, autoConnect: !data.autoConnect })}
-            className={`relative w-8 h-[18px] rounded-full transition-colors ${data.autoConnect ? 'bg-[#10a37f]' : 'bg-app-border'}`}
-          >
-            <span className={`absolute top-[2px] w-[14px] h-[14px] bg-white rounded-full shadow transition-transform ${data.autoConnect ? 'left-[14px]' : 'left-[2px]'}`}></span>
-          </button>
+          <Toggle on={data.autoConnect} onClick={() => onChange({ ...data, autoConnect: !data.autoConnect })} />
           <span className="text-app-text-secondary">自动连接</span>
         </label>
         <div className="flex gap-2">

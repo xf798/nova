@@ -7,6 +7,7 @@ import { useSessionStore } from "../core/sessionStore";
 import { sendMessage } from "../core/sendMessage";
 import { applyWecomInterceptors } from "../core/wecomInterceptor";
 import { checkWecomGuard } from "../core/wecomGuard";
+import { checkWecomAccess, parseWecomPolicy, rememberSender } from "../core/wecomPolicy";
 
 interface UseWecomBridgeParams {
   activeConnectorRef: MutableRefObject<Connector>;
@@ -74,15 +75,42 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
         return;
       }
 
-      // 高危操作守卫：企微通道拦截敏感指令
-      const guardResult = checkWecomGuard(msg.text);
+      // 访问控制：先判断「谁能用」，再判断「能做什么」。
+      //
+      // 策略从机器人连接器配置实时读取，改完设置立即生效，无需重连。
+      const botConn0 = connectorRegistry.getBotConnectors()[0];
+      const policy = parseWecomPolicy(botConn0?.config?.wecomPolicy);
+      const reject = async (content: string) => {
+        if (botConn0) {
+          await botConn0.replyMessage(msg.request_id, content, msg.response_url).catch(() => {});
+        }
+      };
+
+      const access = checkWecomAccess(
+        { senderId: msg.sender_id, senderName: msg.sender_name, chatId: msg.chat_id },
+        policy,
+      );
+      // 记录发言人供「白名单一键添加」使用，被拒的也记（否则无从得知谁在敲门）
+      rememberSender({
+        senderId: msg.sender_id,
+        senderName: msg.sender_name,
+        chatId: msg.chat_id,
+        blocked: !access.allowed,
+      });
+
+      if (!access.allowed) {
+        console.log(`[WeCom] 🚫 访问拒绝 [${access.reason}]: ${msg.sender_name}(${msg.sender_id})`);
+        dbg(`[WeCom] 🚫 访问拒绝 reason=${access.reason} | sender=${msg.sender_name} | id=${msg.sender_id}`);
+        await reject(access.rejectMessage || "⛔ 未授权");
+        return;
+      }
+
+      // 高危操作守卫：按策略里开启的类别拦截
+      const guardResult = checkWecomGuard(msg.text, policy);
       if (guardResult.blocked) {
         console.log(`[WeCom] 🛡️ 守卫拦截 [${guardResult.ruleName}]: ${msg.text.slice(0, 50)}`);
         dbg(`[WeCom] 🛡️ 守卫拦截 rule=${guardResult.ruleName} | text=${msg.text.slice(0, 80)}`);
-        const botConn0 = connectorRegistry.getBotConnectors()[0];
-        if (botConn0) {
-          await botConn0.replyMessage(msg.request_id, guardResult.rejectMessage || "⛔ 该操作被拦截", msg.response_url).catch(() => {});
-        }
+        await reject(guardResult.rejectMessage || "⛔ 该操作被拦截");
         return;
       }
 

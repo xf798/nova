@@ -30,6 +30,8 @@ export interface ConnectorConfig {
   botSecret?: string;         // 机器人密钥
   botName?: string;           // 机器人显示名称
   autoConnect?: boolean;      // 启动时自动连接
+  /** 企微访问策略：谁能用（访问范围）+ 能做什么（高危能力开关） */
+  wecomPolicy?: import("../core/wecomPolicy").WecomPolicy;
 }
 
 /** 历史消息（用于上下文传递） */

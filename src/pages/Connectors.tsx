@@ -5,6 +5,7 @@ import { KiroCliConnector, OpenAIConnector, WeComBotConnector } from "../connect
 import { loadPersistedApiConnectors } from "../connectors/api-storage";
 import type { ConnectorConfig, ConnectorType } from "../connectors";
 import { useSessionStore } from "../core/sessionStore";
+import { DEFAULT_WECOM_POLICY, parseWecomPolicy } from "../core/wecomPolicy";
 import ConnectorCard from "./connectors/ConnectorCard";
 import {
   ApiForm, CliForm, BotForm, ModeSelector,
@@ -17,7 +18,7 @@ type AddMode = "api" | "cli" | "bot";
 
 const defaultApiForm: ApiFormData = { id: "", name: "", endpoint: "https://api.openai.com/v1", apiKey: "", model: "gpt-4o", description: "" };
 const defaultCliForm: CliFormData = { id: "", name: "", command: "", args: "", cwd: "/Users/wangxf/workspace", description: "" };
-const defaultBotForm: BotFormData = { name: "", platform: "wecom", botId: "", secret: "", autoConnect: true };
+const defaultBotForm: BotFormData = { name: "", platform: "wecom", botId: "", secret: "", autoConnect: true, policy: { ...DEFAULT_WECOM_POLICY } };
 
 function ConnectorsPage() {
   const [, setTick] = useState(0);
@@ -60,7 +61,7 @@ function ConnectorsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editApiForm, setEditApiForm] = useState<ApiFormData>({ id: "", name: "", endpoint: "", apiKey: "", model: "", description: "" });
   const [editCliForm, setEditCliForm] = useState<CliFormData>({ id: "", name: "", command: "", args: "", cwd: "", description: "" });
-  const [editBotForm, setEditBotForm] = useState<BotFormData>({ name: "", platform: "wecom", botId: "", secret: "", autoConnect: true });
+  const [editBotForm, setEditBotForm] = useState<BotFormData>({ ...defaultBotForm });
 
   // Bot 连接状态
   useEffect(() => {
@@ -114,12 +115,12 @@ function ConnectorsPage() {
       bot = bots[0];
       await bot.updateConfig({
         botPlatform: botForm.platform, botId: botForm.botId, botSecret: botForm.secret,
-        botName: botForm.name, autoConnect: botForm.autoConnect,
+        botName: botForm.name, autoConnect: botForm.autoConnect, wecomPolicy: botForm.policy,
       });
     } else {
       bot = new WeComBotConnector({
         botPlatform: botForm.platform, botId: botForm.botId, botSecret: botForm.secret,
-        botName: botForm.name, autoConnect: botForm.autoConnect,
+        botName: botForm.name, autoConnect: botForm.autoConnect, wecomPolicy: botForm.policy,
       });
       connectorRegistry.register(bot);
       await bot.persistConfig();
@@ -142,7 +143,7 @@ function ConnectorsPage() {
     } else if (cfg.type === "cli") {
       setEditCliForm({ id: cfg.id, name: cfg.name, command: cfg.command || "", args: (cfg.defaultArgs || []).join(" "), cwd: cfg.cwd || "", description: cfg.description || "" });
     } else if (cfg.type === "bot") {
-      setEditBotForm({ name: cfg.botName || "", platform: cfg.botPlatform || "wecom", botId: cfg.botId || "", secret: cfg.botSecret || "", autoConnect: cfg.autoConnect ?? true });
+      setEditBotForm({ name: cfg.botName || "", platform: cfg.botPlatform || "wecom", botId: cfg.botId || "", secret: cfg.botSecret || "", autoConnect: cfg.autoConnect ?? true, policy: parseWecomPolicy(cfg.wecomPolicy) });
     }
     setEditingId(id);
   };
@@ -194,7 +195,7 @@ function ConnectorsPage() {
       const needReconnect = bot.config.botId !== editBotForm.botId || bot.config.botSecret !== editBotForm.secret;
       await bot.updateConfig({
         botPlatform: editBotForm.platform, botId: editBotForm.botId, botSecret: editBotForm.secret,
-        botName: editBotForm.name, autoConnect: editBotForm.autoConnect,
+        botName: editBotForm.name, autoConnect: editBotForm.autoConnect, wecomPolicy: editBotForm.policy,
       });
       syncWecomSessionTitles(editBotForm.name);
       if (needReconnect && (bot.status === "connected" || bot.status === "connecting")) {
