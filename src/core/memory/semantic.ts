@@ -12,8 +12,19 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-/** 相似度下限。低于此值视为「库里没有相关内容」，不召回。 */
-export const SEMANTIC_THRESHOLD = 0.6;
+/**
+ * 相似度下限。低于此值视为「库里没有相关内容」，不召回。
+ *
+ * 0.55 来自实测校准（6 组口语提问 × 5 个候选阈值）：
+ *   0.45 / 0.50  命中 5/6，平均返回 4.2 条
+ *   0.55         命中 5/6，平均返回 3.7 条  ← 命中率相同但更精简
+ *   0.60         命中 3/6，漏掉一半
+ *
+ * 一开始定的 0.60 太高，是因为只用了 4 个书面化查询校准。换成口语提问
+ * （「之前那个切换慢是怎么弄的」）后发现相关内容落在 0.50-0.60：
+ * 记忆是书面技术总结，提问是口语，语义相近但表达风格差得远。
+ */
+export const SEMANTIC_THRESHOLD = 0.55;
 
 /** 语义召回在最终打分里的权重；其余给关键词 */
 export const SEMANTIC_WEIGHT = 0.6;
@@ -88,16 +99,33 @@ export async function semanticSearch(query: string, topK = 10): Promise<Semantic
 }
 
 /**
- * 把语义得分与关键词得分融合。
+ * RRF（倒数排名融合）的平滑常数。
  *
- * 保留关键词分量的理由：精确的专有名词（minisign、commit hash、
- * rehypeHighlight）向量模型未必编码得好，而关键词匹配对这类最强。两者互补。
- *
- * 只在两侧都有分数时融合；只有一侧命中时按其权重折算，
- * 避免「另一侧为 0」把总分拉到阈值以下。
+ * 越小则头部排名的权重越突出。候选集只有几条，取 10 比常用的 60 更合适。
  */
-export function fuseScores(semantic: number | undefined, keyword: number): number {
-  if (semantic === undefined) return keyword;
-  if (keyword <= 0) return semantic * SEMANTIC_WEIGHT + SEMANTIC_THRESHOLD * (1 - SEMANTIC_WEIGHT);
-  return semantic * SEMANTIC_WEIGHT + keyword * (1 - SEMANTIC_WEIGHT);
+const RRF_K = 10;
+
+/**
+ * 融合语义与关键词两路召回。
+ *
+ * 用排名而非分数：两侧分数量纲完全不同（语义是余弦 0.55-0.75，
+ * 关键词是自定义公式 0.15-0.70），加权平均会出现
+ * 「语义 0.60 + 关键词 0.168」的融合分(0.427)低于「只有语义 0.60」(0.58)
+ * 的荒谬结果 —— 关键词命中反而把排名拉低。
+ *
+ * RRF 只看各路的名次，天然免疫量纲差异，是组合异构检索的标准做法。
+ * 权重体现在 SEMANTIC_WEIGHT：语义路的贡献更大，但关键词路仍能把
+ * 精确命中专有名词（minisign、commit hash）的条目推上来。
+ */
+export function fuseRanked(
+  semanticOrder: string[],
+  keywordOrder: string[],
+): Map<string, number> {
+  const scores = new Map<string, number>();
+  const add = (id: string, rank: number, weight: number) => {
+    scores.set(id, (scores.get(id) ?? 0) + weight / (RRF_K + rank + 1));
+  };
+  semanticOrder.forEach((id, i) => add(id, i, SEMANTIC_WEIGHT));
+  keywordOrder.forEach((id, i) => add(id, i, 1 - SEMANTIC_WEIGHT));
+  return scores;
 }

@@ -91,6 +91,30 @@ export interface PipelineRunRecord {
   totalDuration: number; // ms
 }
 
+// 运行详情（完整快照，每个 run 单独存文件）
+export interface PipelineRunDetailStage {
+  status: StageStatus;
+  progress: number;
+  output: string;
+  error: string;
+  blockers: string[];
+  artifacts: string[];
+  duration: number;
+  startedAt?: string;
+  filesCopied?: string[];
+}
+
+export interface PipelineRunDetail {
+  id: string;
+  status: PipelineStatus;
+  config: PipelineConfig;
+  stages: Record<StageId, PipelineRunDetailStage>;
+  logs: LogEntry[];
+  startedAt: string;
+  completedAt: string;
+  totalDuration: number;
+}
+
 type StateListener = (state: PipelineState) => void;
 
 // ─── 默认配置 ───
@@ -809,6 +833,42 @@ export class PipelineEngine {
 
       await invoke("tool_file_write", { path: filePath, content: JSON.stringify(runs, null, 2) });
       console.log(`[Pipeline] 运行历史已保存: ${record.id}`);
+
+      // 写入详情文件（完整快照）
+      const DATA_DIR = `${DEFAULT_CWD.replace("/workspace", "")}/.nova/data`;
+      const detailDir = `${DATA_DIR}/pipeline-runs`;
+      const detailPath = `${detailDir}/${record.id}.json`;
+
+      // 确保目录存在
+      const mkdirCmd = Command.create("mkdir", ["-p", detailDir]);
+      await mkdirCmd.execute();
+
+      // 构造完整详情快照
+      const detail: PipelineRunDetail = {
+        id: this.state.id,
+        status: this.state.status,
+        config: this.state.config,
+        stages: Object.fromEntries(
+          Object.entries(this.state.stages).map(([k, v]) => [k, {
+            status: v.status,
+            progress: v.progress,
+            output: v.output,
+            error: v.error,
+            blockers: v.blockers,
+            artifacts: v.artifacts,
+            duration: v.duration,
+            startedAt: v.startedAt,
+            filesCopied: v.filesCopied,
+          }])
+        ) as Record<StageId, PipelineRunDetailStage>,
+        logs: this.state.logs,
+        startedAt: this.state.startedAt!,
+        completedAt: this.state.completedAt || new Date().toISOString(),
+        totalDuration: Object.values(this.state.stages).reduce((sum, s) => sum + s.duration, 0),
+      };
+
+      await invoke("tool_file_write", { path: detailPath, content: JSON.stringify(detail, null, 2) });
+      console.log(`[Pipeline] 运行详情已保存: ${detailPath}`);
     } catch (err: any) {
       console.warn("[Pipeline] 持久化运行历史失败:", err.message);
     }
@@ -824,6 +884,20 @@ export class PipelineEngine {
       return JSON.parse(content);
     } catch {
       return [];
+    }
+  }
+
+  /** 读取单次运行详情 */
+  async getRunDetail(id: string): Promise<PipelineRunDetail | null> {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const DATA_DIR = `${DEFAULT_CWD.replace("/workspace", "")}/.nova/data`;
+      const detailPath = `${DATA_DIR}/pipeline-runs/${id}.json`;
+      const raw = await invoke<string>("tool_file_read", { path: detailPath, offset: null, limit: null });
+      const content = raw.replace(/^\s*\d+\| /gm, "");
+      return JSON.parse(content);
+    } catch {
+      return null;
     }
   }
 }

@@ -7,7 +7,7 @@
 import { StorageService } from "../storage";
 import { smartRecall, getRecallConfig } from "./recall";
 import { shouldRecall } from "./recallGate";
-import { semanticSearch, fuseScores } from "./semantic";
+import { semanticSearch, fuseRanked } from "./semantic";
 import type { RecallContext, ScoredMemory } from "./recall";
 
 /** 记忆分类 */
@@ -227,20 +227,18 @@ class LongTermMemoryStore {
     const semanticHits = await semanticSearch(query, 10);
     if (semanticHits.length === 0) return keywordResults;
 
-    const semanticById = new Map(semanticHits.map(h => [h.id, h.score]));
-    const keywordById = new Map(keywordResults.map(r => [r.memory.id, r.score]));
+    // 用排名融合而非分数加权：两侧分数量纲不同，加权会让关键词命中
+    // 反而把语义排名拉低（详见 semantic.ts 的 fuseRanked 注释）
+    const fusedScores = fuseRanked(
+      semanticHits.map(h => h.id),
+      keywordResults.map(r => r.memory.id),
+    );
     const byId = new Map(variable.map(m => [m.id, m]));
 
-    // 两侧命中取并集：语义能捞到词面不命中的，反之亦然
-    const ids = new Set([...semanticById.keys(), ...keywordById.keys()]);
     const fused: ScoredMemory[] = [];
-    for (const id of ids) {
+    for (const [id, score] of fusedScores) {
       const mem = byId.get(id);
-      if (!mem) continue;
-      fused.push({
-        memory: mem,
-        score: fuseScores(semanticById.get(id), keywordById.get(id) ?? 0),
-      });
+      if (mem) fused.push({ memory: mem, score });
     }
     fused.sort((a, b) => b.score - a.score);
     const top = fused.slice(0, getRecallConfig().maxResults);

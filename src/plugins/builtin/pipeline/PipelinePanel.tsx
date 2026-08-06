@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { pipelineEngine } from "./engine";
 import { tchubClient } from "./tchub-client";
 import { useAppStore } from "../../../App";
-import type { PipelineState, PipelineConfig, StageId, LogEntry, TCHubSyncStatus, PipelineRunRecord } from "./engine";
+import type { PipelineState, PipelineConfig, StageId, LogEntry, TCHubSyncStatus, PipelineRunRecord, PipelineRunDetail, PipelineRunDetailStage } from "./engine";
 import type { WorkstreamInfo } from "./tchub-client";
 
 // ─── Constants ───
@@ -61,12 +61,22 @@ function Spinner({ size = 14 }: { size?: number }) {
 export default function PipelinePanel() {
   const [state, setState] = useState<PipelineState>(pipelineEngine.getState());
   const [configOpen, setConfigOpen] = useState(false);
+  const [viewingHistoryId, setViewingHistoryId] = useState<string | null>(null);
 
   useEffect(() => pipelineEngine.subscribe((s) => setState({ ...s })), []);
 
   const { status } = state;
   const isIdle = status === "idle";
   const isActive = status === "running" || status === "paused" || status === "completed" || status === "failed";
+
+  // If viewing history detail, show that instead of normal views
+  if (viewingHistoryId) {
+    return (
+      <div className="max-w-2xl mx-auto w-full py-4 px-1">
+        <HistoryDetailView runId={viewingHistoryId} onBack={() => setViewingHistoryId(null)} />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-2xl mx-auto w-full py-4 px-1">
@@ -89,7 +99,7 @@ export default function PipelinePanel() {
 
       {/* Idle: workstream list or config */}
       {isIdle && configOpen && <ConfigPanel state={state} onClose={() => setConfigOpen(false)} />}
-      {isIdle && !configOpen && <IdlePanel onOpenConfig={() => setConfigOpen(true)} />}
+      {isIdle && !configOpen && <IdlePanel onOpenConfig={() => setConfigOpen(true)} onViewDetail={(id) => setViewingHistoryId(id)} />}
 
       {/* Active: running dashboard */}
       {isActive && <ActiveView state={state} />}
@@ -592,12 +602,13 @@ function Actions({ status, hasPending }: { status: string; hasPending: boolean }
 }
 
 // ─── Idle Panel: Workstream List ───
-function IdlePanel({ onOpenConfig }: { onOpenConfig: () => void }) {
+function IdlePanel({ onOpenConfig, onViewDetail }: { onOpenConfig: () => void; onViewDetail: (id: string) => void }) {
   const [ws, setWs] = useState<WorkstreamInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [startingId, setStartingId] = useState<string | null>(null);
   const [runHistory, setRunHistory] = useState<PipelineRunRecord[]>([]);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => { load(); loadHistory(); }, []);
 
@@ -611,7 +622,7 @@ function IdlePanel({ onOpenConfig }: { onOpenConfig: () => void }) {
 
   const loadHistory = async () => {
     const history = await pipelineEngine.getRunHistory();
-    setRunHistory(history.slice(0, 5));
+    setRunHistory(history.slice(0, 20));
   };
 
   const start = (w: WorkstreamInfo) => {
@@ -627,6 +638,8 @@ function IdlePanel({ onOpenConfig }: { onOpenConfig: () => void }) {
       syncToTchub: true,
     });
   };
+
+  const displayedHistory = showAll ? runHistory : runHistory.slice(0, 5);
 
   return (
     <div>
@@ -697,13 +710,27 @@ function IdlePanel({ onOpenConfig }: { onOpenConfig: () => void }) {
       {/* Recent Runs History */}
       {runHistory.length > 0 && (
         <div className="mt-4 pt-3 border-t border-app-border">
-          <div className="flex items-center gap-1.5 mb-2">
-            <Icon d={icons.clock} size={12} />
-            <span className="text-[11px] text-app-text-muted">最近运行</span>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1.5">
+              <Icon d={icons.clock} size={12} />
+              <span className="text-[11px] text-app-text-muted">最近运行</span>
+            </div>
+            {runHistory.length > 5 && (
+              <button
+                onClick={() => setShowAll(!showAll)}
+                className="text-[10px] text-blue-500 hover:text-blue-400 transition-colors"
+              >
+                {showAll ? "收起" : `查看全部 (${runHistory.length})`}
+              </button>
+            )}
           </div>
           <div className="space-y-1.5">
-            {runHistory.map((run) => (
-              <div key={run.id} className="flex items-center justify-between px-3 py-2 rounded-lg border border-app-border bg-app-bg">
+            {displayedHistory.map((run) => (
+              <div
+                key={run.id}
+                className="flex items-center justify-between px-3 py-2 rounded-lg border border-app-border bg-app-bg hover:border-app-text-muted/30 cursor-pointer transition-colors group"
+                onClick={() => onViewDetail(run.id)}
+              >
                 <div className="flex items-center gap-2 min-w-0">
                   <RunStatusDot status={run.status} />
                   <span className="text-[11px] text-app-text truncate">{run.config.specName || run.id}</span>
@@ -711,6 +738,7 @@ function IdlePanel({ onOpenConfig }: { onOpenConfig: () => void }) {
                 <div className="flex items-center gap-3 shrink-0">
                   <span className="text-[10px] text-app-text-muted tabular-nums">{fmt(run.totalDuration)}</span>
                   <span className="text-[10px] text-app-text-muted tabular-nums">{formatRelative(run.completedAt)}</span>
+                  <span className="text-[10px] text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity">详情 →</span>
                 </div>
               </div>
             ))}
@@ -744,6 +772,300 @@ function formatRelative(iso: string): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}天前`;
   return new Date(iso).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+}
+
+
+// ─── History Detail View ───
+function HistoryDetailView({ runId, onBack }: { runId: string; onBack: () => void }) {
+  const [detail, setDetail] = useState<PipelineRunDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [expandedStages, setExpandedStages] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setLoading(true);
+    pipelineEngine.getRunDetail(runId).then((d) => {
+      setDetail(d);
+      setLoading(false);
+    });
+  }, [runId]);
+
+  const toggleStage = (stageId: string) => {
+    setExpandedStages((prev) => {
+      const next = new Set(prev);
+      if (next.has(stageId)) next.delete(stageId);
+      else next.add(stageId);
+      return next;
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="py-12 flex items-center justify-center gap-2 text-[12px] text-app-text-muted">
+        <Spinner size={14} />
+        加载详情...
+      </div>
+    );
+  }
+
+  if (!detail) {
+    return (
+      <div className="space-y-3">
+        <button onClick={onBack} className="flex items-center gap-1 text-[12px] text-app-text-muted hover:text-app-text transition-colors">
+          <Icon d="M19 12H5M12 19l-7-7 7-7" size={12} />
+          返回
+        </button>
+        <div className="py-8 text-center border border-dashed border-app-border rounded-lg">
+          <div className="text-[12px] text-app-text-muted">详情数据不可用</div>
+          <div className="text-[10px] text-app-text-muted mt-1">该运行记录可能在旧版本中创建，无详情快照</div>
+        </div>
+      </div>
+    );
+  }
+
+  const stageEntries = (Object.entries(detail.stages) as [StageId, PipelineRunDetailStage][]);
+
+  return (
+    <div className="space-y-4">
+      {/* Top: back + title + status + duration */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 min-w-0">
+          <button onClick={onBack} className="p-1 rounded text-app-text-muted hover:text-app-text transition-colors shrink-0" title="返回">
+            <Icon d="M19 12H5M12 19l-7-7 7-7" size={14} />
+          </button>
+          <span className="text-[13px] font-medium text-app-text truncate">{detail.config.specName || detail.id}</span>
+          <StatusPill status={detail.status} />
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[11px] text-app-text-muted tabular-nums flex items-center gap-1">
+            <Icon d={icons.clock} size={11} />
+            {fmt(detail.totalDuration)}
+          </span>
+        </div>
+      </div>
+
+      {/* Time range */}
+      <div className="flex items-center gap-3 text-[10px] text-app-text-muted">
+        <span>开始: {new Date(detail.startedAt).toLocaleString("zh-CN")}</span>
+        {detail.completedAt && <span>结束: {new Date(detail.completedAt).toLocaleString("zh-CN")}</span>}
+      </div>
+
+      {/* Stage stepper (read-only) */}
+      <div className="flex items-center justify-between px-2 py-2 rounded-lg border border-app-border bg-app-bg">
+        {STAGES.map((s, i) => {
+          const st = detail.stages[s.id];
+          if (!st) return null;
+          const done = st.status === "success";
+          const failed = st.status === "failed";
+          const skipped = st.status === "skipped";
+
+          let dotCls = "w-3 h-3 rounded-full border-2 transition-all ";
+          if (done) dotCls += "bg-green-500 border-green-500";
+          else if (failed) dotCls += "bg-red-500 border-red-500";
+          else if (skipped) dotCls += "bg-neutral-400 border-neutral-400";
+          else dotCls += "bg-transparent border-app-border";
+
+          return (
+            <React.Fragment key={s.id}>
+              <div className="flex flex-col items-center gap-1.5">
+                <div className={dotCls} />
+                <span className={`text-[11px] ${done ? "text-green-600" : failed ? "text-red-500" : skipped ? "text-neutral-400" : "text-app-text-muted"}`}>
+                  {s.short}
+                </span>
+                {st.duration > 0 && <span className="text-[10px] text-app-text-muted tabular-nums">{fmt(st.duration)}</span>}
+              </div>
+              {i < STAGES.length - 1 && (
+                <div className={`flex-1 h-[2px] mx-2 rounded-full ${done ? "bg-green-500/40" : "bg-app-border"}`} />
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      {/* Stage details accordion */}
+      <div className="space-y-2">
+        <div className="text-[11px] text-app-text-muted font-medium">阶段详情</div>
+        {stageEntries.map(([stageId, stageData]) => {
+          const label = STAGES.find(s => s.id === stageId)?.label || stageId;
+          const isExpanded = expandedStages.has(stageId);
+          const statusLabel = stageData.status === "success" ? "✅ 成功" : stageData.status === "failed" ? "❌ 失败" : stageData.status === "skipped" ? "⏭ 跳过" : "⏳ 等待";
+          const borderColor = stageData.status === "success" ? "border-l-green-500" : stageData.status === "failed" ? "border-l-red-500" : "border-l-neutral-400";
+
+          return (
+            <div key={stageId} className={`rounded-lg border border-app-border bg-app-bg border-l-2 ${borderColor} overflow-hidden`}>
+              <button
+                onClick={() => toggleStage(stageId)}
+                className="w-full px-3 py-2 flex items-center justify-between hover:bg-app-surface-hover transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Icon d={isExpanded ? icons.chevUp : icons.chevDown} size={11} />
+                  <span className="text-[12px] font-medium text-app-text">{label}</span>
+                  <span className="text-[10px] text-app-text-muted">{statusLabel}</span>
+                </div>
+                {stageData.duration > 0 && (
+                  <span className="text-[10px] text-app-text-muted tabular-nums">{fmt(stageData.duration)}</span>
+                )}
+              </button>
+
+              {isExpanded && (
+                <div className="px-3 pb-3 space-y-2 border-t border-app-border pt-2">
+                  {/* Output */}
+                  {stageData.output && (
+                    <div>
+                      <div className="text-[10px] text-app-text-muted mb-1">Output</div>
+                      <div className="px-2 py-1.5 rounded bg-app-surface-hover text-app-text-muted font-mono text-[10px] max-h-[100px] overflow-y-auto leading-relaxed">
+                        {stageData.output.slice(0, 500)}{stageData.output.length > 500 ? "..." : ""}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error */}
+                  {stageData.error && (
+                    <div>
+                      <div className="text-[10px] text-app-text-muted mb-1">Error</div>
+                      <div className="px-2 py-1.5 rounded bg-red-500/5 border border-red-500/20 text-red-400 font-mono text-[10px]">
+                        {stageData.error}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Blockers */}
+                  {stageData.blockers && stageData.blockers.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-app-text-muted mb-1">Blockers</div>
+                      <div className="space-y-1">
+                        {stageData.blockers.map((b, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-[10px] text-yellow-500">
+                            <Icon d={icons.alert} size={10} cls="shrink-0 mt-0.5" />
+                            <span>{b}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Artifacts */}
+                  {stageData.artifacts && stageData.artifacts.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-app-text-muted mb-1 flex items-center gap-1">
+                        <Icon d={icons.file} size={10} />
+                        产出文件 ({stageData.artifacts.length})
+                      </div>
+                      <div className="space-y-0.5 pl-3">
+                        {stageData.artifacts.map((f, i) => (
+                          <div key={i} className="text-[10px] font-mono text-app-text-muted truncate">
+                            {basename(f)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Logs */}
+      {detail.logs && detail.logs.length > 0 && (
+        <HistoryLogPanel logs={detail.logs} />
+      )}
+
+      {/* Config info */}
+      <div className="rounded-lg border border-app-border bg-app-bg p-3">
+        <div className="text-[11px] text-app-text-muted font-medium mb-2">运行配置</div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[10px]">
+          {detail.config.specName && (
+            <>
+              <span className="text-app-text-muted">Spec Name</span>
+              <span className="text-app-text font-mono">{detail.config.specName}</span>
+            </>
+          )}
+          {detail.config.targetDir && (
+            <>
+              <span className="text-app-text-muted">输出目录</span>
+              <span className="text-app-text font-mono">{detail.config.targetDir}</span>
+            </>
+          )}
+          {detail.config.prdPath && (
+            <>
+              <span className="text-app-text-muted">PRD 路径</span>
+              <span className="text-app-text font-mono truncate">{basename(detail.config.prdPath)}</span>
+            </>
+          )}
+          {detail.config.pmCwd && (
+            <>
+              <span className="text-app-text-muted">PM CWD</span>
+              <span className="text-app-text font-mono truncate">{detail.config.pmCwd}</span>
+            </>
+          )}
+          {detail.config.uxCwd && (
+            <>
+              <span className="text-app-text-muted">UX CWD</span>
+              <span className="text-app-text font-mono truncate">{detail.config.uxCwd}</span>
+            </>
+          )}
+          {detail.config.devCwd && (
+            <>
+              <span className="text-app-text-muted">Dev CWD</span>
+              <span className="text-app-text font-mono truncate">{detail.config.devCwd}</span>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── History Log Panel (always expanded, read-only) ───
+function HistoryLogPanel({ logs }: { logs: LogEntry[] }) {
+  const [open, setOpen] = useState(false);
+  const [stageFilter, setStageFilter] = useState<StageId | "system" | "all">("all");
+
+  const filtered = logs.filter(log => {
+    if (stageFilter !== "all" && log.stage !== stageFilter) return false;
+    return true;
+  });
+
+  const display = open ? filtered.slice(-100) : filtered.slice(-5);
+  const lvlCls: Record<string, string> = { info: "text-blue-400", warn: "text-yellow-500", error: "text-red-500", success: "text-green-500" };
+  const stageCls: Record<string, string> = { pm: "text-blue-400", ux: "text-purple-400", dev: "text-amber-500", system: "text-app-text-muted" };
+
+  const filterBtnCls = (active: boolean) =>
+    `px-1.5 py-0.5 rounded text-[9px] transition-colors ${active ? "bg-blue-500/20 text-blue-500" : "text-app-text-muted hover:text-app-text"}`;
+
+  return (
+    <div>
+      <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-[11px] text-app-text-muted hover:text-app-text transition-colors mb-1.5">
+        <Icon d={open ? icons.chevUp : icons.chevDown} size={12} />
+        日志 ({logs.length}{filtered.length !== logs.length ? ` / 显示 ${filtered.length}` : ""})
+      </button>
+
+      {open && (
+        <div className="flex items-center gap-1 mb-1.5">
+          <span className="text-[9px] text-app-text-muted">阶段:</span>
+          {(["all", "pm", "ux", "dev", "system"] as const).map(s => (
+            <button key={s} onClick={() => setStageFilter(s)} className={filterBtnCls(stageFilter === s)}>
+              {s === "all" ? "全部" : s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className={`rounded-lg border border-app-border bg-app-bg p-2 font-mono text-[10px] leading-relaxed overflow-y-auto transition-all ${open ? "max-h-[300px]" : "max-h-[72px]"}`}>
+        {display.length === 0 && (
+          <div className="text-app-text-muted text-center py-2">无匹配日志</div>
+        )}
+        {display.map((log, i) => (
+          <div key={i} className="flex items-baseline gap-2 py-0.5">
+            <span className="text-app-text-muted tabular-nums shrink-0">{new Date(log.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+            <span className={`shrink-0 ${stageCls[log.stage] || ""}`}>{log.stage}</span>
+            <span className={`${lvlCls[log.level] || "text-app-text"}`}>{log.message}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ─── Config Panel (collapsible, not modal) ───
