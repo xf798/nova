@@ -67,7 +67,6 @@ function ChatView() {
     q[sid] = (q[sid] || []).filter(i => i.id !== id);
     bumpQueue();
   };
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const sendTimeRef = useRef<number>(0);
   const MIN_LOADING_MS = 600;
@@ -207,25 +206,18 @@ function ChatView() {
     setHasMoreMessages(useSessionStore.getState().hasMoreMessages(activeSessionId));
   }, [activeSessionId]);
 
-  // 会话切换时立刻强制容器 reflow。
+  // 切换会话或消息增长后回到底部。
   //
-  // 与上面的 key 是双重保险：key 保证 DOM 不复用，reflow 进一步促使
-  // WebView 丢弃旧内容的绘制。这个残留问题已复现两次，宁可多做一步。
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    el.style.display = "none";
-    // 读取 offsetHeight 强制 reflow
-    void el.offsetHeight;
-    el.style.display = "";
-  }, [activeSessionId]);
-
-  // 切换会话或消息增长后滚到底部。
+  // 容器带 key，切换时会重建，scrollTop 归零，因此必须在内容提交后重新定位。
   //
-  // 容器带 key 会在切换时重建，scrollTop 归零，因此这里必须在内容提交后
-  // 重新滚到底部，否则会停在顶部。
+  // 刻意用 scrollTop 直接赋值而非 scrollIntoView：后者会让 WebView 在同一帧
+  // 内既重建图层又滚动，实测出现过同一段内容在多个偏移上重复绘制的残留
+  // （截图里同一条消息叠了三次）。直接设 scrollTop 的 DOM 改动更少。
+  //
+  // 另外已移除原先的 display:none + 读 offsetHeight 强制 reflow：
+  // 它让元素脱离再回到渲染树，是干扰合成的可疑来源，而 key 已经保证了
+  // DOM 不复用，这一步是多余的。
   useEffect(() => {
-    // 渲染出来的会话变了 → 视作需要停在底部
     if (prevSessionRef.current !== activeSessionId) {
       prevSessionRef.current = activeSessionId;
       isNearBottomRef.current = true;
@@ -233,14 +225,17 @@ function ChatView() {
 
     if (isNearBottomRef.current && messages.length > 0) {
       requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+        const el = scrollContainerRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
       });
     }
   }, [activeSessionId, messages.length]);
 
+  // 流式输出期间跟随到底部（平滑，不在会话切换的关键帧里）
   useEffect(() => {
     if (isNearBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      const el = scrollContainerRef.current;
+      el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
   }, [messages]);
 
@@ -797,7 +792,6 @@ function ChatView() {
                 }}
               />
             ))}
-            <div ref={messagesEndRef} />
           </div>
         )}
       </div>
