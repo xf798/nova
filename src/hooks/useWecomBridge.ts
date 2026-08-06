@@ -6,6 +6,7 @@ import type { Connector } from "../connectors";
 import { useSessionStore } from "../core/sessionStore";
 import { sendMessage } from "../core/sendMessage";
 import { applyWecomInterceptors } from "../core/wecomInterceptor";
+import { checkWecomGuard } from "../core/wecomGuard";
 
 interface UseWecomBridgeParams {
   activeConnectorRef: MutableRefObject<Connector>;
@@ -70,6 +71,18 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
 
       if (disposed) {
         console.log(`[WeCom] ⏭️ listener 已 disposed，忽略消息: ${msg.text.slice(0, 30)}`);
+        return;
+      }
+
+      // 高危操作守卫：企微通道拦截敏感指令
+      const guardResult = checkWecomGuard(msg.text);
+      if (guardResult.blocked) {
+        console.log(`[WeCom] 🛡️ 守卫拦截 [${guardResult.ruleName}]: ${msg.text.slice(0, 50)}`);
+        dbg(`[WeCom] 🛡️ 守卫拦截 rule=${guardResult.ruleName} | text=${msg.text.slice(0, 80)}`);
+        const botConn0 = connectorRegistry.getBotConnectors()[0];
+        if (botConn0) {
+          await botConn0.replyMessage(msg.request_id, guardResult.rejectMessage || "⛔ 该操作被拦截", msg.response_url).catch(() => {});
+        }
         return;
       }
 
