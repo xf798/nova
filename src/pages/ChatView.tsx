@@ -5,6 +5,8 @@ import { connectorInstances, connectorRegistry } from "../connectors";
 import { buildSuggestions } from "../core/suggestions";
 import { chatAttachments } from "../core/chatAttachments";
 import { pendingModel } from "../core/pendingModel";
+import SearchPanel from "./chat/SearchPanel";
+import type { SearchScope } from "../core/sessionSearch";
 import type { Suggestion } from "../core/suggestions";
 import type { QuotedMessage } from "../core/types";
 import { memoryManager } from "../core/memory";
@@ -52,7 +54,11 @@ function ChatView() {
   const [showSkillPopover, setShowSkillPopover] = useState(false);
   const [_recalledCount, setRecalledCount] = useState(0);
   const [quotedMessage, setQuotedMessage] = useState<QuotedMessage | null>(null);
-  /** 其他页面请求发送的内容，等会话就绪后由 effect 消费 */  const [pendingExternalSend, setPendingExternalSend] = useState<string | null>(null);
+  /** 其他页面请求发送的内容，等会话就绪后由 effect 消费 */
+  const [pendingExternalSend, setPendingExternalSend] = useState<string | null>(null);
+  /** 会话搜索面板 */
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchScope, setSearchScope] = useState<SearchScope>("session");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // ── 输入框指令队列：AI 输出中发送的消息进入队列，回答结束后自动出队 ──
@@ -244,6 +250,21 @@ function ChatView() {
     if (selectedWorkspace) paths.push(selectedWorkspace);
     getActiveSkillList(paths).then(setActiveSkills).catch(() => setActiveSkills([]));
   }, [selectedWorkspace, attachments]);
+
+  // ⌘F 搜当前会话，⌘⇧F 直接搜全部会话。
+  //
+  // 不用浏览器原生查找：它只能命中已渲染的 DOM，而首屏只加载一页、切走还会
+  // 裁剪内存，长会话里搜不到未加载的部分。这里搜的是磁盘上的 jsonl。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "f") return;
+      e.preventDefault();
+      setSearchScope(e.shiftKey ? "global" : "session");
+      setSearchOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const ensureSession = (): string => {
     if (activeSession) return activeSession.id;
@@ -939,6 +960,13 @@ function ChatView() {
           }
           return hasAny ? total : undefined;
         })()}
+      />
+
+      <SearchPanel
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        sessionId={activeSessionId}
+        initialScope={searchScope}
       />
     </div>
   );

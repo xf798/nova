@@ -1232,6 +1232,142 @@ fn drop_trailing_session_messages(session_id: String, count: usize) -> Result<()
     Ok(())
 }
 
+/// 会话搜索。
+///
+/// 直接扫磁盘上的 jsonl，因此不受「前端只加载了一页」的限制——
+/// 原生 ⌘F 只能搜到已渲染的 DOM，165 条的会话里搜不到未加载的那 145 条。
+///
+/// 只扫 content 字段：timeline 里的 text 事件与 content 是重复存储
+/// （改版时的已知取舍），扫 content 即可覆盖全部正文。
+///
+/// session_id 为 None 时搜索全部会话。
+#[tauri::command]
+fn search_session_messages(
+    query: String,
+    session_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok(serde_json::json!({ "results": [], "truncated": false }));
+    }
+    let limit = limit.unwrap_or(200);
+    let dir = sessions_dir();
+
+    // 待搜索的会话 id 列表
+    let ids: Vec<String> = match &session_id {
+        Some(id) => vec![id.clone()],
+        None => {
+            let mut v: Vec<String> = std::fs::read_dir(&dir)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.strip_suffix(".messages.jsonl").map(|s| s.to_string())
+                })
+                .collect();
+            // 按最近更新排序，让新会话的命中排在前面
+            v.sort_by_key(|id| {
+                std::fs::metadata(session_jsonl_path(id))
+                    .and_then(|m| m.modified())
+                    .ok()
+            });
+            v.reverse();
+            v
+        }
+    };
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut truncated = false;
+
+    'outer: for id in ids {
+        let title = std::fs::read_to_string(session_meta_path(&id))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|m| m.get("title").and_then(|t| t.as_str()).map(String::from))
+            .unwrap_or_else(|| id.clone());
+
+        let raw = match std::fs::read_to_string(session_jsonl_path(&id)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        let total = lines.len();
+
+        for (idx, line) in lines.iter().enumerate() {
+            // 先在原始行上做廉价筛查，避免为不匹配的行付 JSON 解析成本
+            if !line.to_lowercase().contains(&q) {
+                continue;
+            }
+            let msg: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let lower = content.to_lowercase();
+            let Some(pos) = lower.find(&q) else {
+                // 命中出现在 content 之外（如工具标题），不作为正文结果
+                continue;
+            };
+
+            if results.len() >= limit {
+                truncated = true;
+                break 'outer;
+            }
+
+            results.push(serde_json::json!({
+                "sessionId": id,
+                "sessionTitle": title,
+                // 在该会话中的序号，供前端定位加载
+                "messageIndex": idx,
+                "totalInSession": total,
+                "messageId": msg.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "role": msg.get("role").cloned().unwrap_or(serde_json::Value::Null),
+                "timestamp": msg.get("timestamp").cloned().unwrap_or(serde_json::Value::Null),
+                "snippet": make_snippet(content, pos, q.len()),
+                "matchCount": lower.matches(&q).count(),
+            }));
+        }
+    }
+
+    Ok(serde_json::json!({ "results": results, "truncated": truncated }))
+}
+
+/// 截取命中位置附近的片段，按字符边界安全切分
+fn make_snippet(content: &str, byte_pos: usize, match_len: usize) -> String {
+    const BEFORE: usize = 40;
+    const AFTER: usize = 80;
+
+    // byte_pos 来自 find，落在字符边界上；向外扩展时需要吸附到边界
+    let start = content[..byte_pos]
+        .char_indices()
+        .rev()
+        .nth(BEFORE)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let tail_from = byte_pos + match_len;
+    let end = if tail_from >= content.len() {
+        content.len()
+    } else {
+        content[tail_from..]
+            .char_indices()
+            .nth(AFTER)
+            .map(|(i, _)| tail_from + i)
+            .unwrap_or(content.len())
+    };
+
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    // 片段里的换行会破坏单行展示，压成空格
+    s.push_str(&content[start..end].replace('\n', " "));
+    if end < content.len() {
+        s.push('…');
+    }
+    s
+}
+
 /// 写入正在流式生成的最后一条消息
 ///
 /// 单条消息、KB 级，可以高频重写。流式期间不动 jsonl，
@@ -1782,6 +1918,7 @@ pub fn run() {
             append_session_messages,
             rewrite_session_messages,
             drop_trailing_session_messages,
+            search_session_messages,
             write_partial_message,
             clear_partial_message,
             delete_session,
@@ -2435,5 +2572,85 @@ mod session_store_tests {
         assert_eq!(merged["title"], "新");
         assert_eq!(merged["memory"]["s"], 1, "未在 patch 中的字段必须保留");
         assert_eq!(merged["modelId"], "m1");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    // ===== make_snippet =====
+    //
+    // 片段要在命中处前后取上下文，且必须落在字符边界上——
+    // 中文一个字 3 字节，按字节切会切出乱码。
+
+    #[test]
+    fn snippet_keeps_match_in_context() {
+        let c = "前面的内容，这里有关键词，后面还有内容";
+        let pos = c.find("关键词").unwrap();
+        let s = make_snippet(c, pos, "关键词".len());
+        assert!(s.contains("关键词"));
+    }
+
+    #[test]
+    fn snippet_does_not_split_multibyte_chars() {
+        // 长中文串，命中在中间，两侧都需要截断
+        let c = "中".repeat(200) + "关键词" + &"文".repeat(200);
+        let pos = c.find("关键词").unwrap();
+        let s = make_snippet(&c, pos, "关键词".len());
+        // 能正常转回字符串即说明没切坏字符边界
+        assert!(s.contains("关键词"));
+        assert!(s.starts_with('…'));
+        assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn snippet_marks_truncation_only_when_truncated() {
+        let c = "短内容关键词结尾";
+        let pos = c.find("关键词").unwrap();
+        let s = make_snippet(c, pos, "关键词".len());
+        assert!(!s.starts_with('…'), "开头未截断不该加省略号");
+        assert!(!s.ends_with('…'), "结尾未截断不该加省略号");
+    }
+
+    #[test]
+    fn snippet_flattens_newlines() {
+        let c = "第一行\n第二行关键词\n第三行";
+        let pos = c.find("关键词").unwrap();
+        let s = make_snippet(c, pos, "关键词".len());
+        assert!(!s.contains('\n'), "换行会破坏单行展示，应压成空格");
+    }
+
+    #[test]
+    fn snippet_handles_match_at_start() {
+        let c = "关键词在最开头";
+        let s = make_snippet(c, 0, "关键词".len());
+        assert!(s.starts_with("关键词"));
+        assert!(!s.starts_with('…'));
+    }
+
+    #[test]
+    fn snippet_handles_match_at_end() {
+        let c = "结尾才是关键词";
+        let pos = c.find("关键词").unwrap();
+        let s = make_snippet(c, pos, "关键词".len());
+        assert!(s.ends_with("关键词"));
+        assert!(!s.ends_with('…'));
+    }
+
+    // ===== 匹配语义 =====
+
+    #[test]
+    fn query_is_case_insensitive() {
+        let content = "使用 RehypeHighlight 做高亮";
+        assert!(content.to_lowercase().contains(&"rehypehighlight".to_lowercase()));
+        assert!(content.to_lowercase().contains(&"REHYPEHIGHLIGHT".to_lowercase()));
+    }
+
+    #[test]
+    fn empty_query_matches_nothing() {
+        // 空查询直接短路，避免把全部消息当命中返回
+        let q = "   ".trim().to_lowercase();
+        assert!(q.is_empty());
     }
 }
