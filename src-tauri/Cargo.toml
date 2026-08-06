@@ -1,6 +1,6 @@
 [package]
 name = "nova"
-version = "0.1.7"
+version = "0.1.8"
 description = "Nova - AI Chat Client"
 authors = ["wangxf"]
 edition = "2021"
