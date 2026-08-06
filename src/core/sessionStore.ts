@@ -3,6 +3,7 @@ import type { Message, ChatSession } from "./types";
 import { sessionStorage } from "./sessionStorage";
 import { chatDrafts } from "./chatDrafts";
 import { chatAttachments } from "./chatAttachments";
+import { markClick, markStore, markData } from "./switchProfiler";
 
 
 export interface SessionMeta {
@@ -341,19 +342,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   switchSession: async (sessionId) => {
     const prevId = get().activeSessionId;
+    const target = get().sessions.find(s => s.id === sessionId);
+    markClick(sessionId, !!target?.messagesLoaded);
     set({ activeSessionId: sessionId });
+    markStore();
     // 先切再裁：裁剪只影响已经不显示的会话，不该拖慢切换本身
     if (prevId && prevId !== sessionId) void trimInactiveSession(prevId);
 
     const session = get().sessions.find(s => s.id === sessionId);
     // 用 messagesLoaded 判断而非 messages.length：
     // 后者会让真正空的会话每次切换都重复读盘
+    if (session?.messagesLoaded) markData(session.messages.length);
+
     if (session && !session.messagesLoaded) {
       try {
         const result = await sessionStorage.loadMessages(sessionId);
         // 登记已持久化位置：磁盘上最后一条就是锚点，
         // 后续 debouncedSave 只追加它之后的消息
         markPersisted(sessionId, result.messages, result.partialIncluded);
+        markData(result.messages.length);
         set(state => ({
           sessions: state.sessions.map(s =>
             s.id === sessionId

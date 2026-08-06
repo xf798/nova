@@ -5,6 +5,7 @@ import type { TimelineEvent } from "../../connectors";
 import { deriveLegacyTimeline } from "../../connectors/timeline";
 import ProcessTimeline from "./ProcessTimeline";
 import RecallBlock from "./RecallBlock";
+import CollapsibleText from "./CollapsibleText";
 
 // ─── Tool Call Types ───
 interface ToolCallInfo {
@@ -113,10 +114,11 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
             </div>
           )}
           {message.content && (
-            <div className="px-4 py-2.5 rounded-3xl text-[14px] leading-relaxed whitespace-pre-wrap break-words"
-              style={{ backgroundColor: "var(--app-msg-user-bg)" }}>
-              {message.content}
-            </div>
+            <CollapsibleText
+              text={message.content}
+              className="px-4 py-2.5 rounded-3xl text-[14px] leading-relaxed whitespace-pre-wrap break-words"
+              style={{ backgroundColor: "var(--app-msg-user-bg)" }}
+            />
           )}
           {onQuote && message.content && (
             <div className="mt-1 flex items-center gap-2 justify-end opacity-0 group-hover:opacity-100 transition-opacity">

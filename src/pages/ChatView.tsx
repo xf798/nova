@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
 import { buildSuggestions } from "../core/suggestions";
 import { chatAttachments } from "../core/chatAttachments";
 import { pendingModel } from "../core/pendingModel";
+import { markCommitAndReport } from "../core/switchProfiler";
 import SearchPanel from "./chat/SearchPanel";
 import type { SearchScope } from "../core/sessionSearch";
 import type { Suggestion } from "../core/suggestions";
@@ -211,6 +212,12 @@ function ChatView() {
     if (!activeSessionId) { setHasMoreMessages(false); return; }
     setHasMoreMessages(useSessionStore.getState().hasMoreMessages(activeSessionId));
   }, [activeSessionId]);
+
+  // 测量：渲染提交时刻。用 useLayoutEffect 而非 useEffect —— 前者在 DOM
+  // 更新后、浏览器绘制前同步触发，能把「React 渲染」与「浏览器绘制」分开计时。
+  useLayoutEffect(() => {
+    markCommitAndReport();
+  }, [activeSessionId, messages.length]);
 
   // 切换会话或消息增长后回到底部。
   //

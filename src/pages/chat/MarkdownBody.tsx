@@ -14,7 +14,7 @@
 //
 // marked 仅用于切块，渲染仍由 react-markdown 负责，以保留下方自定义组件。
 
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import { marked } from "marked";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -137,14 +137,63 @@ const MarkdownBlock = memo(
   (prev, next) => prev.content === next.content,
 );
 
+// ===== 超长内容折叠 =====
+//
+// 实测（4053 个真实文本段）：P95 只有 1.5KB、P99 是 4.6KB，但最大有 554KB。
+// 超过 8KB 的只占 0.6%（25 段），却占了全部正文量的 64% ——
+// 极少数超长内容吃掉了绝大部分渲染成本。
+//
+// 两个慢会话的实测数据也指向这里：
+//   「客户画像后端代码」单条 13.7KB 含 43 个代码块 → commit 357ms
+//   「客户画像问题修复」单条 150KB → paint 164ms（浏览器绘制不动这么大的节点）
+//
+// 这类内容多是贴进来的大段日志或代码，本来也不会逐行读，默认折叠更合理。
+const COLLAPSE_THRESHOLD = 8 * 1024;
+/** 折叠时先显示多少内容 */
+const PREVIEW_CHARS = 2 * 1024;
+
+/** 取够 PREVIEW_CHARS 的前若干块；至少保留 1 块，避免出现空预览 */
+function previewBlocks(blocks: string[]): string[] {
+  const out: string[] = [];
+  let acc = 0;
+  for (const b of blocks) {
+    out.push(b);
+    acc += b.length;
+    if (acc >= PREVIEW_CHARS) break;
+  }
+  return out.length > 0 ? out : blocks.slice(0, 1);
+}
+
 const MarkdownBody = memo(function MarkdownBody({ children }: { children: string }) {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
+  const collapsible = children.length > COLLAPSE_THRESHOLD;
+  const [expanded, setExpanded] = useState(false);
+
+  const shown = collapsible && !expanded ? previewBlocks(blocks) : blocks;
+  const hiddenCount = blocks.length - shown.length;
 
   return (
     <div className="markdown-body text-[14px] leading-relaxed text-app-text">
-      {blocks.map((block, i) => (
+      {shown.map((block, i) => (
         <MarkdownBlock key={i} content={block} />
       ))}
+      {collapsible && (
+        expanded ? (
+          <button
+            onClick={() => setExpanded(false)}
+            className="mt-1 text-[12px] text-app-text-muted hover:text-app-text transition-colors"
+          >
+            收起
+          </button>
+        ) : (
+          <button
+            onClick={() => setExpanded(true)}
+            className="mt-1 text-[12px] text-app-text-muted hover:text-app-text transition-colors"
+          >
+            展开全文（还有 {hiddenCount} 段，共 {(children.length / 1024).toFixed(0)}KB）
+          </button>
+        )
+      )}
     </div>
   );
 });
