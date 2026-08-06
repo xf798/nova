@@ -151,6 +151,19 @@ const MarkdownBlock = memo(
 const COLLAPSE_THRESHOLD = 8 * 1024;
 /** 折叠时先显示多少内容 */
 const PREVIEW_CHARS = 2 * 1024;
+/**
+ * 代码块数量也计入折叠判断。
+ *
+ * 代码块比同等长度的纯文本贵得多（要跑 rehypeHighlight）：实测一条仅
+ * 3.5KB 的消息含 9 个代码块就要 19ms，而 10KB 纯文本只要几毫秒。
+ * 只看字符数会漏掉这类「短但密」的内容。
+ */
+const CODE_BLOCK_THRESHOLD = 6;
+
+/** 统计 markdown 里的围栏代码块数 */
+function countCodeBlocks(md: string): number {
+  return Math.floor((md.match(/```/g) || []).length / 2);
+}
 
 /** 取够 PREVIEW_CHARS 的前若干块；至少保留 1 块，避免出现空预览 */
 function previewBlocks(blocks: string[]): string[] {
@@ -166,7 +179,10 @@ function previewBlocks(blocks: string[]): string[] {
 
 const MarkdownBody = memo(function MarkdownBody({ children }: { children: string }) {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
-  const collapsible = children.length > COLLAPSE_THRESHOLD;
+  const collapsible = useMemo(
+    () => children.length > COLLAPSE_THRESHOLD || countCodeBlocks(children) > CODE_BLOCK_THRESHOLD,
+    [children],
+  );
   const [expanded, setExpanded] = useState(false);
 
   const shown = collapsible && !expanded ? previewBlocks(blocks) : blocks;

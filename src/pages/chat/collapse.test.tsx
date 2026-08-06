@@ -109,3 +109,25 @@ describe("MarkdownBody — markdown 折叠", () => {
     expect(rendered).toBeLessThan(60);
   });
 });
+
+describe("MarkdownBody — 代码块数量也触发折叠", () => {
+  it("短但代码块多的内容会折叠（代码块比同长度纯文本贵得多）", () => {
+    // 实测：3.5KB 含 9 个代码块的消息要 19ms，而 10KB 纯文本只要几毫秒
+    const md = Array.from({ length: 9 }, (_, i) => `说明${i}\n\n\`\`\`ts\nconst a${i}=${i};\n\`\`\``).join("\n\n");
+    expect(md.length).toBeLessThan(8 * 1024);
+    const html = render(React.createElement(MarkdownBody, null, md));
+    expect(html).toContain("展开全文");
+  });
+
+  it("代码块数量在阈值内不折叠", () => {
+    const md = Array.from({ length: 3 }, (_, i) => `说明${i}\n\n\`\`\`ts\nconst a${i}=${i};\n\`\`\``).join("\n\n");
+    const html = render(React.createElement(MarkdownBody, null, md));
+    expect(html).not.toContain("展开全文");
+  });
+
+  it("行内反引号不被误计为代码块", () => {
+    const md = "这里有 `inline` 和 `more` 行内代码，共 6 个反引号但没有围栏";
+    const html = render(React.createElement(MarkdownBody, null, md));
+    expect(html).not.toContain("展开全文");
+  });
+});

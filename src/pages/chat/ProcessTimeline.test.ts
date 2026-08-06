@@ -156,3 +156,35 @@ describe("hasActiveWork — 决定是否补尾部等待指示", () => {
     expect(hasActiveWork([tool("a"), text("中间"), runningTool("b")])).toBe(true);
   });
 });
+
+// ===== 工具密集时收起过程 =====
+//
+// 逐组折叠不够用：工具与文本交替出现时每组只有 1-2 个，达不到分组阈值
+// 就全部逐行渲染。实测某条消息 173 个工具被切成 65 组，其中 57 个是独立行，
+// 单条产出 67KB DOM。
+describe("工具密集判定", () => {
+  const HEAVY = 24;
+  const decide = (toolCount: number, isStreaming: boolean) =>
+    !isStreaming && toolCount >= HEAVY;
+
+  it("工具很多且非流式 → 收起", () => {
+    expect(decide(173, false)).toBe(true);
+  });
+
+  it("恰好达到阈值 → 收起", () => {
+    expect(decide(24, false)).toBe(true);
+  });
+
+  it("阈值以下 → 正常显示", () => {
+    expect(decide(23, false)).toBe(false);
+    expect(decide(5, false)).toBe(false);
+  });
+
+  it("流式期间不收起（正在跑时需要看见进度）", () => {
+    expect(decide(173, true)).toBe(false);
+  });
+
+  it("无工具时不收起", () => {
+    expect(decide(0, false)).toBe(false);
+  });
+});

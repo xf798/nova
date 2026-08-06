@@ -298,6 +298,18 @@ function PendingRow() {
   );
 }
 
+/**
+ * 单条消息里工具事件超过此数量，工具行默认收起。
+ *
+ * 逐组折叠不够用：工具与文本交替出现时，每组往往只有 1-2 个，达不到
+ * TOOL_GROUP_THRESHOLD 就全部逐行渲染。实测某条消息 173 个工具被切成
+ * 65 组，其中 57 个是独立行，单条消息就产出 67KB DOM
+ * （该会话切换的 commit 停在 102-197ms）。
+ *
+ * 只收工具、正文照常显示 —— 回看历史时要读的是结论，工具调用是过程噪音。
+ */
+const TOOL_HEAVY_THRESHOLD = 24;
+
 function ProcessTimeline({
   events,
   isStreaming,
@@ -310,10 +322,30 @@ function ProcessTimeline({
   // 流式中若没有任何进行中的单元，说明处于事件间隙，补一个等待指示
   const showPending = isStreaming && !hasActiveWork(events);
 
+  const toolCount = events.filter(e => e.kind === "tool").length;
+  // 流式期间不收起：正在跑的时候需要看见进度
+  const heavy = !isStreaming && toolCount >= TOOL_HEAVY_THRESHOLD;
+  const [toolsShown, setToolsShown] = useState(false);
+  const hideTools = heavy && !toolsShown;
+
   return (
     <>
+      {heavy && (
+        <button
+          onClick={() => setToolsShown(!toolsShown)}
+          className="flex items-center gap-1 mb-1 text-[12px] text-app-text-muted hover:text-app-text-secondary transition-colors"
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            className={`transition-transform ${toolsShown ? "rotate-90" : ""}`}>
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+          {toolsShown ? "收起过程" : `展开过程（${toolCount} 次工具调用）`}
+        </button>
+      )}
       {units.map((unit, ui) => {
         if (unit.type === "toolGroup") {
+          // 工具密集时默认不渲染工具行，正文仍按原顺序显示
+          if (hideTools) return null;
           const { events: tools, lastIndex: groupLast } = unit;
           // 组内有工具在跑，或流式且该组是最后一个单元 → 视为进行中
           const hasRunning = tools.some(t => t.status === "in_progress" || t.status === "pending");
