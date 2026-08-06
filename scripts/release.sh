@@ -128,7 +128,13 @@ case "$ARCH" in
   *) die "未知架构: $ARCH" ;;
 esac
 
-NOTES="$(git log -1 --pretty=%s)"
+# 更新说明。
+#
+# 原先取 git log -1，但最后一次提交必然是「版本升级到 x.y.z」，
+# 0.1.9 就把这句话发成了更新弹窗的正文。改为跳过版本升级提交，
+# 需要完整说明时用 NOTES 环境变量覆盖：
+#   NOTES="$(cat notes.md)" scripts/release.sh
+NOTES="${NOTES:-$(git log -20 --pretty=%s | grep -v -E '^chore: 版本升级' | head -1)}"
 LATEST_JSON="$BUNDLE_DIR/latest.json"
 
 info "生成 latest.json (platform=$PLATFORM)"
