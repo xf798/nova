@@ -20,6 +20,7 @@ import { useSessionStore } from "../core/sessionStore";
 import { scheduler } from "../core/scheduler";
 import ChatInput from "./chat/ChatInput";
 import MessageItem from "./chat/MessageItem";
+import { isNearBottom, shouldSmoothFollow } from "./chat/scrollFollow";
 
 // 队列项：AI 输出中排队待发的指令
 interface QueuedItem {
@@ -208,6 +209,8 @@ function ChatView() {
 
   // 切换会话或消息加载完成时，强制滚到底部
   const prevSessionRef = useRef<string | null>(null);
+  // 标记「这次提交来自会话切换」，供平滑跟随让位（见 scrollFollow）
+  const justSwitchedRef = useRef(false);
   // 分页状态跟随真正的活跃会话（与渲染无关，用非延迟值）
   useEffect(() => {
     if (!activeSessionId) { setHasMoreMessages(false); return; }
@@ -235,12 +238,14 @@ function ChatView() {
     if (prevSessionRef.current !== activeSessionId) {
       prevSessionRef.current = activeSessionId;
       isNearBottomRef.current = true;
+      // 让紧随其后的平滑跟随让位：两个滚动同时进行时，平滑动画会盖掉
+      // 这里的直接赋值，最终停在半路（表现为切换后没到底部）
+      justSwitchedRef.current = true;
     }
 
     if (isNearBottomRef.current && messages.length > 0) {
-      // 需要两次定位：content-visibility:auto 让视口外的消息先用估算高度，
-      // 首帧的 scrollHeight 是估值，滚过去之后实际高度陆续测出来会让位置偏移。
-      // 第二帧再校正一次，落到真正的底部。
+      // 定位两次：第一帧过后代码高亮、图片等才落定，高度会变，
+      // 第二帧再校正一次才落到真正的底部。
       requestAnimationFrame(() => {
         const el = scrollContainerRef.current;
         if (!el) return;
@@ -255,7 +260,13 @@ function ChatView() {
 
   // 流式输出期间跟随到底部（平滑，不在会话切换的关键帧里）
   useEffect(() => {
-    if (isNearBottomRef.current) {
+    const follow = shouldSmoothFollow({
+      justSwitched: justSwitchedRef.current,
+      isNearBottom: isNearBottomRef.current,
+      messageCount: messages.length,
+    });
+    justSwitchedRef.current = false;
+    if (follow) {
       const el = scrollContainerRef.current;
       el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
@@ -718,7 +729,7 @@ function ChatView() {
       <div key={activeSessionId ?? "__new__"} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" ref={scrollContainerRef} onScroll={() => {
         const el = scrollContainerRef.current;
         if (el) {
-          isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+          isNearBottomRef.current = isNearBottom(el);
           if (el.scrollTop < 100 && hasMoreMessages && !isLoadingMore) {
             handleLoadMore();
           }
@@ -799,20 +810,25 @@ function ChatView() {
             {messages.map((msg, idx) => (
               // 每条消息独立成绘制/布局隔离区。
               //
-              // 一是修绘制残留：WKWebView 在滚动容器里内容高度变化后有时不清除
+              // 修绘制残留：WKWebView 在滚动容器里内容高度变化后有时不清除
               // 旧绘制（已复现四次：旧会话内容叠在欢迎页上、同一消息重复三次、
               // 工具耗时的半透明幽灵漂在文本行上）。折叠功能会在首次绘制后改变
               // 高度，正好把这个潜伏问题触发出来。contain 把重绘范围限制在单条
               // 消息内，高度变化不再污染邻近区域。
               //
-              // 二是省渲染：content-visibility:auto 让视口外的消息跳过渲染，
-              // 相当于浏览器原生的虚拟化，不必自己实现变高虚拟列表。
-              // contain-intrinsic-size 给未渲染项一个高度估值，避免滚动条跳动；
-              // auto 关键字会记住实际测量值，滚过一次后估值就准了。
-              <div
-                key={msg.id}
-                style={{ contentVisibility: "auto", containIntrinsicSize: "auto 240px" }}
-              >
+              // 原先这里用的是 content-visibility:auto + contain-intrinsic-size:
+              // auto 240px（靠它顺带拿到 containment），已撤掉，因为估值不可靠：
+              // 实测「客户画像-UI」末 20 条真实高度约 1888px，而 240px×20 估成
+              // 4800px，高估 2.5 倍；代码密集的会话则反过来低估。切换会话时
+              // scrollTop = scrollHeight 用的就是这个假高度，于是滚到内容之外，
+              // 底部一片空白、要手动滚一下才逐步显形。
+              //
+              // 快速上滚的重影也是它：整棵子树在「跳过渲染 / 恢复渲染」之间
+              // 反复切换，WKWebView 的图层块来不及失效，旧像素就留在屏上。
+              //
+              // 不做虚拟化的代价可控：首屏只 20 条、翻页 30 条，且超长正文本身
+              // 会被折叠（8KB 或 >6 代码块），单条渲染成本已有上限。
+              <div key={msg.id} style={{ contain: "layout paint style" }}>
               <MessageItem
                 message={msg}
                 onImageClick={(path) => setPreviewPanel({ type: 'image', data: path })}
