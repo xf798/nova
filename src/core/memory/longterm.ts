@@ -6,6 +6,7 @@
 
 import { StorageService } from "../storage";
 import { smartRecall } from "./recall";
+import { shouldRecall } from "./recallGate";
 import type { RecallContext, ScoredMemory } from "./recall";
 
 /** 记忆分类 */
@@ -168,6 +169,16 @@ class LongTermMemoryStore {
    * @returns 格式化的 system prompt 文本，或 null
    */
   async buildVariableContext(query: string, context?: RecallContext): Promise<string | null> {
+    // 闸门：无主题的输入不召回。
+    //
+    // 「可以，按完整方案实现」这类确认/指令语没有话题，任何打分算法都只能
+    // 靠泛用动词（实现/完成/方案）擦线命中，塞进上下文全是噪音。
+    // 实测 1208 条真实消息里有 6.3% 属于此类。
+    if (!shouldRecall(query)) {
+      console.log(`[Memory LT] 跳过召回：输入无实义内容 "${query.slice(0, 30)}"`);
+      return null;
+    }
+
     const memories = await this.ensureLoaded();
     // 排除 user_preference（已在 stable 层）
     const variable = memories.filter(m => m.category !== "user_preference");
@@ -200,6 +211,9 @@ class LongTermMemoryStore {
    * 返回 variable 层的回忆结果（不含 user_preference，那些在 stable 层）。
    */
   async getRecalledMemories(query: string, context?: RecallContext): Promise<ScoredMemory[]> {
+    // 与 buildVariableContext 用同一道闸门：否则召回面板显示「召回 N 条」
+    // 而实际什么都没注入，两边对不上
+    if (!shouldRecall(query)) return [];
     const memories = await this.ensureLoaded();
     const variable = memories.filter(m => m.category !== "user_preference");
     if (variable.length === 0) return [];
