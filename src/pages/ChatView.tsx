@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../App";
 import { connectorInstances, connectorRegistry } from "../connectors";
 import { buildSuggestions } from "../core/suggestions";
@@ -31,6 +32,9 @@ interface QueuedItem {
 
 /** 输入队列单会话最大排队数 */
 const MAX_QUEUE_SIZE = 20;
+
+/** 排查「队列跨会话展示」用；确认后改回 false */
+const QUEUE_DEBUG = true;
 
 // 出队/队列触发发送时携带的上下文
 interface QueuedSend {
@@ -915,6 +919,17 @@ function ChatView() {
       {/* 指令队列展示：排队中的消息 */}
       {activeSessionId && (messageQueueRef.current[activeSessionId]?.length ?? 0) > 0 && (
         <div className="px-4 pb-1">
+          {/* 诊断：排查「队列跨会话展示」时打开。读代码看逻辑是隔离的，
+              需要实际数据确认是渲染用错了 sessionId 还是入队放错了桶。 */}
+          {QUEUE_DEBUG && (() => {
+            const buckets = Object.entries(messageQueueRef.current)
+              .filter(([, v]) => v.length > 0)
+              .map(([k, v]) => `${k.slice(8, 22)}:${v.length}`);
+            invoke("debug_log", {
+              msg: `📋 [QUEUE] 当前会话 ${activeSessionId.slice(8, 22)} 展示 ${messageQueueRef.current[activeSessionId].length} 条 | 非空桶: ${buckets.join(", ")}`,
+            }).catch(() => {});
+            return null;
+          })()}
           <div className="max-w-[760px] mx-auto flex flex-wrap gap-1.5">
             {messageQueueRef.current[activeSessionId].map((item, idx) => (
               <div

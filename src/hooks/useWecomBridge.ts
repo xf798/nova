@@ -125,6 +125,17 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
         connectorInstances.markBusy(wecomSessionId, baseConnector.config.id);
 
         const curSession = useSessionStore.getState().sessions.find(s => s.id === wecomSessionId);
+
+        // Per-session 模型选择。
+        //
+        // 正常发送路径（ChatView）会在发送前 setModel(session.modelId)，
+        // 企微这条路原先漏了，导致在企微会话里切了模型也不生效。
+        const sessionModelId = curSession?.modelId;
+        if (sessionModelId && sessionModelId !== "auto" && connector.setModel) {
+          connector.setModel(sessionModelId);
+          console.log(`[WeCom] 🎯 Per-session 模型: "${sessionModelId}"`);
+        }
+
         const connectorSessionId = curSession?.connectorSessionId || undefined;
         const sessionMessages = (curSession?.messages || []).filter(m => m.content !== "$$LOADING$$");
 

@@ -35,7 +35,22 @@ function ModelSelector() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isOpen]);
 
-  if (!activeConnector.capabilities.supportsModelSwitch) return null;
+  // 解析真正的对话后端。
+  //
+  // 企微会话的 connectorId 是 wecom-bot，而它只是消息通道
+  // （supportsModelSwitch: false），实际回答由 cli/api 连接器生成
+  // —— useWecomBridge 里有「bot 类型不能作为后端，回落到 cli」的逻辑。
+  // 若按 wecom-bot 的能力判断，企微会话就永远看不到模型切换入口。
+  const backend = (() => {
+    const session = useSessionStore.getState().sessions.find(s => s.id === activeSessionId);
+    const own = session?.connectorId ? connectorRegistry.get(session.connectorId) : null;
+    // 会话自己的连接器能作为后端就用它，否则回落到全局活跃连接器
+    if (own && own.config.type !== "bot" && own.config.enabled) return own;
+    if (activeConnector.config.type !== "bot") return activeConnector;
+    return connectorRegistry.getByType("cli")[0] ?? activeConnector;
+  })();
+
+  if (!backend.capabilities.supportsModelSwitch) return null;
 
   // 无会话时用暂存值回显，避免选了却显示 Auto
   const currentModel = sessionModelId || pendingSelection || "auto";
@@ -46,7 +61,8 @@ function ModelSelector() {
     if (models.length === 0) {
       setLoading(true);
       try {
-        const result = await activeConnector.listModels!();
+        // 用真实后端列模型：wecom-bot 没有 listModels
+        const result = await backend.listModels!();
         setModels(result.models);
       } catch {}
       setLoading(false);
@@ -69,7 +85,9 @@ function ModelSelector() {
     const curSession = useSessionStore.getState().sessions.find(s => s.id === activeSessionId);
     const connId = curSession?.connectorId;
     const baseConn = connId ? connectorRegistry.get(connId) : null;
-    const effectiveBase = (baseConn && baseConn.config.enabled) ? baseConn : activeConnector;
+    // bot 类型不能作为后端实例的宿主，与 useWecomBridge 的解析保持一致
+    const effectiveBase =
+      baseConn && baseConn.config.enabled && baseConn.config.type !== "bot" ? baseConn : backend;
     const sessionConn = connectorInstances.get(activeSessionId, effectiveBase.config.id);
     if (sessionConn?.setModel) {
       sessionConn.setModel(modelId);
