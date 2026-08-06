@@ -14,7 +14,7 @@
 //
 // marked 仅用于切块，渲染仍由 react-markdown 负责，以保留下方自定义组件。
 
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useState, useRef } from "react";
 import { marked } from "marked";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -177,11 +177,30 @@ function previewBlocks(blocks: string[]): string[] {
   return out.length > 0 ? out : blocks.slice(0, 1);
 }
 
-const MarkdownBody = memo(function MarkdownBody({ children }: { children: string }) {
+const MarkdownBody = memo(function MarkdownBody({
+  children,
+  allowCollapse = true,
+}: {
+  children: string;
+  /** 流式输出中传 false：内容正在增长，不能在用户眼前收起来 */
+  allowCollapse?: boolean;
+}) {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
+
+  // 闩锁：只要曾以「不可折叠」状态渲染过，就一直保持展开。
+  //
+  // 否则流式结束的那一刻 allowCollapse 变 true，刚读到一半的回答会突然
+  // 收起来 —— 跟流式期间折叠一样突兀。
+  // 会话切换会重建组件，闩锁随之复位，所以回看历史时照常折叠。
+  const everUncollapsible = useRef(!allowCollapse);
+  if (!allowCollapse) everUncollapsible.current = true;
+
   const collapsible = useMemo(
-    () => children.length > COLLAPSE_THRESHOLD || countCodeBlocks(children) > CODE_BLOCK_THRESHOLD,
-    [children],
+    () =>
+      allowCollapse &&
+      !everUncollapsible.current &&
+      (children.length > COLLAPSE_THRESHOLD || countCodeBlocks(children) > CODE_BLOCK_THRESHOLD),
+    [children, allowCollapse],
   );
   const [expanded, setExpanded] = useState(false);
 

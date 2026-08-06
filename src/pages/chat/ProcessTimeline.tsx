@@ -369,7 +369,8 @@ function ProcessTimeline({
           // 空白片段不渲染，避免产生空段落间距
           const text = event.text.trimEnd();
           if (!text) return null;
-          return <MarkdownBody key={key}>{text}</MarkdownBody>;
+          // 流式中不折叠：内容还在增长，收起来会让人以为输出断了
+          return <MarkdownBody key={key} allowCollapse={!isStreaming}>{text}</MarkdownBody>;
         }
 
         // 思考段的「进行中」判定：流式且是最后一个事件且尚未封段

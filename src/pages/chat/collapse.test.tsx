@@ -131,3 +131,32 @@ describe("MarkdownBody — 代码块数量也触发折叠", () => {
     expect(html).not.toContain("展开全文");
   });
 });
+
+describe("流式输出期间不折叠", () => {
+  const bigMd = Array.from({ length: 600 }, (_, i) =>
+    `第 ${i} 段内容，补充一些文字让这一段够长一点。`
+  ).join("\n\n");
+
+  it("allowCollapse=false 时不折叠（内容还在增长，收起会以为输出断了）", () => {
+    expect(bigMd.length).toBeGreaterThan(8 * 1024);
+    const html = render(React.createElement(MarkdownBody, { allowCollapse: false, children: bigMd }));
+    expect(html).not.toContain("展开全文");
+  });
+
+  it("allowCollapse=false 时代码块多也不折叠", () => {
+    const md = Array.from({ length: 9 }, (_, i) => `说明${i}\n\n\`\`\`ts\nconst a${i}=${i};\n\`\`\``).join("\n\n");
+    const html = render(React.createElement(MarkdownBody, { allowCollapse: false, children: md }));
+    expect(html).not.toContain("展开全文");
+  });
+
+  it("默认允许折叠（历史消息不传该 prop）", () => {
+    const html = render(React.createElement(MarkdownBody, null, bigMd));
+    expect(html).toContain("展开全文");
+  });
+
+  it("流式中的内容全部渲染出来，不只是预览", () => {
+    const html = render(React.createElement(MarkdownBody, { allowCollapse: false, children: bigMd }));
+    // 末段也应在 DOM 里
+    expect(html).toContain("第 599 段内容");
+  });
+});
