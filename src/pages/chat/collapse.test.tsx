@@ -76,12 +76,14 @@ describe("MarkdownBody — markdown 折叠", () => {
     expect(html).not.toContain("展开全文");
   });
 
-  it("超长内容折叠并显示剩余段数", () => {
+  it("超长内容折叠并标出总大小", () => {
     const md = Array.from({ length: 600 }, (_, i) => `第 ${i} 段内容，补充一些文字让这一段够长一点。`).join("\n\n");
     expect(md.length).toBeGreaterThan(8 * 1024);
     const html = render(React.createElement(MarkdownBody, null, md));
     expect(html).toContain("展开全文");
-    expect(html).toContain("还有");
+    // 折叠时只解析预览片段，数不出总段数，因此只标总大小。
+    // React 会把插值拆成独立文本节点，去掉注释标记再匹配
+    expect(html.replace(/<!-- -->/g, "")).toMatch(/共 \d+KB/);
   });
 
   it("折叠后仍渲染出预览内容，不是空白", () => {

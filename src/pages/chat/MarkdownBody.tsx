@@ -185,8 +185,6 @@ const MarkdownBody = memo(function MarkdownBody({
   /** 流式输出中传 false：内容正在增长，不能在用户眼前收起来 */
   allowCollapse?: boolean;
 }) {
-  const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
-
   // 闩锁：只要曾以「不可折叠」状态渲染过，就一直保持展开。
   //
   // 否则流式结束的那一刻 allowCollapse 变 true，刚读到一半的回答会突然
@@ -203,9 +201,18 @@ const MarkdownBody = memo(function MarkdownBody({
     [children, allowCollapse],
   );
   const [expanded, setExpanded] = useState(false);
+  const collapsed = collapsible && !expanded;
 
-  const shown = collapsible && !expanded ? previewBlocks(blocks) : blocks;
-  const hiddenCount = blocks.length - shown.length;
+  // 折叠时只解析预览所需的那一段，不 lexer 整段。
+  //
+  // 实测 151KB 的消息全量 lexer 要 7.1ms，而折叠态只显示 2KB 预览 ——
+  // 这 7ms 是白花的。切片多取一倍余量，保证凑够预览量后还能在块边界收尾。
+  const blocks = useMemo(
+    () => parseMarkdownIntoBlocks(collapsed ? children.slice(0, PREVIEW_CHARS * 2) : children),
+    [children, collapsed],
+  );
+
+  const shown = collapsed ? previewBlocks(blocks) : blocks;
 
   return (
     <div className="markdown-body text-[14px] leading-relaxed text-app-text">
@@ -225,7 +232,7 @@ const MarkdownBody = memo(function MarkdownBody({
             onClick={() => setExpanded(true)}
             className="mt-1 text-[12px] text-app-text-muted hover:text-app-text transition-colors"
           >
-            展开全文（还有 {hiddenCount} 段，共 {(children.length / 1024).toFixed(0)}KB）
+            展开全文（共 {(children.length / 1024).toFixed(0)}KB）
           </button>
         )
       )}
