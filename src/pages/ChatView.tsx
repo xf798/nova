@@ -237,9 +237,17 @@ function ChatView() {
     }
 
     if (isNearBottomRef.current && messages.length > 0) {
+      // 需要两次定位：content-visibility:auto 让视口外的消息先用估算高度，
+      // 首帧的 scrollHeight 是估值，滚过去之后实际高度陆续测出来会让位置偏移。
+      // 第二帧再校正一次，落到真正的底部。
       requestAnimationFrame(() => {
         const el = scrollContainerRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+        requestAnimationFrame(() => {
+          const el2 = scrollContainerRef.current;
+          if (el2) el2.scrollTop = el2.scrollHeight;
+        });
       });
     }
   }, [activeSessionId, messages.length]);
@@ -788,8 +796,23 @@ function ChatView() {
               </div>
             ) : null}
             {messages.map((msg, idx) => (
-              <MessageItem
+              // 每条消息独立成绘制/布局隔离区。
+              //
+              // 一是修绘制残留：WKWebView 在滚动容器里内容高度变化后有时不清除
+              // 旧绘制（已复现四次：旧会话内容叠在欢迎页上、同一消息重复三次、
+              // 工具耗时的半透明幽灵漂在文本行上）。折叠功能会在首次绘制后改变
+              // 高度，正好把这个潜伏问题触发出来。contain 把重绘范围限制在单条
+              // 消息内，高度变化不再污染邻近区域。
+              //
+              // 二是省渲染：content-visibility:auto 让视口外的消息跳过渲染，
+              // 相当于浏览器原生的虚拟化，不必自己实现变高虚拟列表。
+              // contain-intrinsic-size 给未渲染项一个高度估值，避免滚动条跳动；
+              // auto 关键字会记住实际测量值，滚过一次后估值就准了。
+              <div
                 key={msg.id}
+                style={{ contentVisibility: "auto", containIntrinsicSize: "auto 240px" }}
+              >
+              <MessageItem
                 message={msg}
                 onImageClick={(path) => setPreviewPanel({ type: 'image', data: path })}
                 onAddAttachment={(path) => setAttachments(prev => prev.includes(path) ? prev : [...prev, path])}
@@ -819,6 +842,7 @@ function ChatView() {
                   }
                 }}
               />
+              </div>
             ))}
           </div>
         )}

@@ -163,9 +163,11 @@ const ToolRow = memo(function ToolRow({ event, compact = false }: { event: Timel
       <div className="flex-shrink-0 flex items-center">
         {running ? <SpinnerIcon /> : failed ? <CrossIcon /> : <CheckIcon className="text-green-600 dark:text-green-400" />}
       </div>
-      <span className="truncate min-w-0">{cleanToolTitle(event.title)}</span>
+      <span className="truncate min-w-0 flex-1">{cleanToolTitle(event.title)}</span>
+      {/* 耗时靠 flex-1 的标题推到行尾：标题用 truncate，若不给它 flex-1，
+          标题短时耗时会紧贴标题、标题长时又被挤压，位置看着飘忽不定 */}
       {duration !== undefined && !running && (
-        <span className="shrink-0 text-app-text-muted opacity-60">{formatDuration(duration)}</span>
+        <span className="shrink-0 text-app-text-muted opacity-60 tabular-nums">{formatDuration(duration)}</span>
       )}
     </div>
   );
