@@ -26,6 +26,7 @@ import {
   stripInlineToolCalls,
   type ToolExecResult,
 } from "./toolExecutor";
+import { MAX_TOOL_LOOPS, isToolLoopCapped, withToolLoopCapNotice } from "./toolLoopCap";
 
 export interface SendMessageParams {
   input: string;
@@ -222,7 +223,6 @@ export async function sendMessage(
 
   // 7. Tool Loop：如果 AI 返回了 tool_calls，执行并回注结果
   const allToolResults: ToolExecResult[] = [];
-  const MAX_TOOL_LOOPS = 25;
   let toolLoopCount = 0;
   const accumulatedToolMessages: any[] = [];  // 累积所有轮次的 tool 交互
 
@@ -362,10 +362,15 @@ export async function sendMessage(
     console.log(`[Nova:Send]   ✅ ← tool loop #${toolLoopCount} 返回 | content: ${result.content.length}chars | toolCalls: ${result.toolCalls?.length || 0}`);
   }
 
+  const cappedByToolLoop = isToolLoopCapped(toolLoopCount, result.toolCalls?.length || 0);
+
   if (toolLoopCount > 0) {
     // 并入最后一轮（不再触发工具的那次）连接器产出的过程事件
     appendConnectorTimeline(result.meta?.timeline);
     console.log(`[Nova:Send]   🔧 Tool Loop 结束，共 ${toolLoopCount} 轮，执行了 ${allToolResults.length} 个 tools`);
+  }
+  if (cappedByToolLoop) {
+    console.warn(`[Nova:Send]   ⚠️ 撞上工具轮次上限 ${MAX_TOOL_LOOPS}，仍有 ${result.toolCalls?.length} 个待执行工具，任务未完成`);
   }
 
   // 8. 后处理：对于非 tool loop 模式（kiro-cli 等），仍执行旧的正则 action 解析
@@ -424,6 +429,14 @@ export async function sendMessage(
         }
       }
     }
+  }
+
+  // 撞上轮次上限时把中断说明并进正文。
+  //
+  // 放在最后：此时 inline fallback 等对 content 的加工都已完成，
+  // 且提示应当出现在正文末尾。
+  if (cappedByToolLoop) {
+    content = withToolLoopCapNotice(content, allToolResults.length);
   }
 
   // 收集 tool 产生的附件（如截图图片路径）
