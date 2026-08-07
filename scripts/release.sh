@@ -103,7 +103,12 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat "$SIGNING_KEY")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 # 注意：targets 必须显式指定，配成 "all" 时 tauri CLI 会跳过打包
-node ./node_modules/.bin/tauri build --bundles app,dmg
+#
+# CI=true 让 tauri 给 bundle_dmg.sh 传 --skip-jenkins，跳过用 Finder
+# 美化 DMG 窗口的那段 AppleScript。那一步依赖「发送 Apple 事件给 Finder」
+# 的自动化授权，而每次终端宿主程序更新（如 kiro-cli 自更新）授权就会失效，
+# 报 -1743 让整个打包失败。窗口摆放是纯观感，不值得为它卡住发版。
+CI=true node ./node_modules/.bin/tauri build --bundles app,dmg
 
 # ── 4. 定位产物 ──
 APP_TARGZ="$BUNDLE_DIR/macos/Nova.app.tar.gz"
