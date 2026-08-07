@@ -27,6 +27,7 @@ import {
   type ToolExecResult,
 } from "./toolExecutor";
 import { MAX_TOOL_LOOPS, isToolLoopCapped, withToolLoopCapNotice } from "./toolLoopCap";
+import { isTurnInterrupted, withTurnInterruptNotice } from "./turnInterrupt";
 
 export interface SendMessageParams {
   input: string;
@@ -437,6 +438,15 @@ export async function sendMessage(
   // 且提示应当出现在正文末尾。
   if (cappedByToolLoop) {
     content = withToolLoopCapNotice(content, allToolResults.length);
+  }
+
+  // Agent 侧自行中断本轮时补一句说明。
+  //
+  // 这种情况 stopReason 仍是 end_turn，界面上与正常结束毫无区别，
+  // 用户只看到任务停在半路却没有任何解释。
+  if (isTurnInterrupted(content)) {
+    console.warn("[Nova:Send]   ⚠️ 检测到 Agent 侧中断标记，本轮任务可能未完成");
+    content = withTurnInterruptNotice(content);
   }
 
   // 收集 tool 产生的附件（如截图图片路径）

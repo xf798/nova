@@ -29,6 +29,38 @@ async function fileLog(message: string): Promise<void> {
   }
 }
 
+/**
+ * ACP 流式 chunk 的事件名判定。
+ *
+ * 名字必须和 Agent 实际发送的一致，写错了不会报错、只会静默丢内容：
+ * 思考内容曾因为匹配 thought_message_chunk（从文档猜的名字）而全部丢失，
+ * 实际 kiro-cli 发的是 agent_thought_chunk。导出供测试固定真实名字。
+ *
+ * 大小写两种写法都留着：不同引擎版本出现过 snake_case 与 PascalCase 混用。
+ */
+export function isThoughtChunk(type: string): boolean {
+  return (
+    type === "agent_thought_chunk" || type === "AgentThoughtChunk" ||
+    // 早期从文档里读到的名字，实际未观测到，留作兼容
+    type === "thought_message_chunk" || type === "ThoughtMessageChunk"
+  );
+}
+
+export function isTextChunk(type: string): boolean {
+  return type === "agent_message_chunk" || type === "AgentMessageChunk";
+}
+
+/**
+ * 高频流式 chunk 不写文件日志。
+ *
+ * fileLog 每行 spawn 一个 sh 进程，正文和思考都是逐 token 推送的，
+ * 一次长任务能有十几万条。这些内容本身已经进 timeline 和消息正文，
+ * 日志里再存一份只是把磁盘和进程数吃掉。
+ */
+export function isHighFrequencyChunk(type: string): boolean {
+  return isTextChunk(type) || isThoughtChunk(type);
+}
+
 /** ACP JSON-RPC 请求 */
 interface AcpRequest {
   jsonrpc: "2.0";
@@ -574,6 +606,10 @@ export class KiroCliConnector implements Connector {
       this.acpProcess = null;
       this.initialized = false;
       this.sessionId = null;
+      // 在途 prompt 随进程一起消失，标记必须一起清掉。
+      // 否则 activePromptId 会一直留着，而它现在是「拒绝并发 prompt」的判据，
+      // 残留会让这个会话永久发不出消息，连自动重连重试也会被自己挡住。
+      this.activePromptId = null;
       for (const [id, pending] of this.pendingRequests) {
         console.warn(`[ACP] reject pending request id=${id}`);
         pending.reject(new Error(wasIdleKill ? "ACP process idle-killed" : "ACP process closed"));
@@ -669,9 +705,14 @@ export class KiroCliConnector implements Connector {
         const params = msg.params as { update?: AcpSessionUpdate } & Partial<AcpSessionUpdate>;
         const update = params.update ?? params;
         if (typeof update.sessionUpdate === "string") {
-          // 详细日志：记录每种 sessionUpdate 的完整结构到文件（排除高频 agent_message_chunk 的内容）
+          // 详细日志：记录每种 sessionUpdate 的完整结构到文件。
+          //
+          // 必须排除高频 chunk 类型：fileLog 每行都要 spawn 一个 sh 进程，
+          // 实测 acp-session.log 里 agent_thought_chunk 有 14.6 万条、
+          // 且当时每条还额外走一次兜底日志 —— 近 30 万次进程创建、日志 65MB，
+          // 全发生在 Agent 干活期间。
           const type = update.sessionUpdate;
-          if (type !== "agent_message_chunk" && type !== "AgentMessageChunk") {
+          if (!isHighFrequencyChunk(type)) {
             fileLog(`[Notification] type="${type}" | FULL: ${JSON.stringify(update).slice(0, 500)}`);
           }
           this.notificationHandler(update as AcpSessionUpdate);
@@ -1210,6 +1251,21 @@ export class KiroCliConnector implements Connector {
       throw new Error("ACP connector disposed: 此实例已被释放，请使用新实例");
     }
 
+    // ── 拒绝并发 prompt ──
+    //
+    // 一个 ACP session 同时只能有一个活跃 turn。往正在应答的 session 再发
+    // 一个 session/prompt，Agent 会把它当成「用户打断」，前一个 turn 直接终止，
+    // 正文末尾留下一句 "Response was interrupted by the user" —— 用户看到的是
+    // 「任务自行停止了」，而实际上什么都没点。
+    //
+    // ChatView 有排队机制，但它依赖自己的 UI 状态判断忙闲；企微通道、
+    // 后台蒸馏、MCP 的 chat.send 等路径都不经过那个队列，能直接把 prompt
+    // 塞进正在工作的 session。所以这道约束必须放在它真正成立的地方。
+    if (this.activePromptId !== null) {
+      fileLog(`⛔ 拒绝并发 prompt | sessionId: ${this.sessionId} | 在途 promptId: ${this.activePromptId}`);
+      throw new Error("当前会话正在应答中，请等回答结束后再发送（避免打断正在进行的任务）");
+    }
+
     // 重置闲置定时器（有新请求进来，延迟 kill）
     this.resetIdleTimer();
     this._lastActiveAt = Date.now();
@@ -1415,7 +1471,7 @@ export class KiroCliConnector implements Connector {
         const type = update.sessionUpdate;
 
         // AgentMessageChunk — 流式文本
-        if (type === "agent_message_chunk" || type === "AgentMessageChunk") {
+        if (isTextChunk(type)) {
           // content 在 message chunk 中是 AcpTextContent（单个对象，非数组）
           const c = update.content;
           if (!c || Array.isArray(c) || c.type !== "text" || !c.text) return;
@@ -1424,8 +1480,14 @@ export class KiroCliConnector implements Connector {
           currentToolName = "";
           emitChunk();
         }
-        // ThoughtMessageChunk — Agent 内部思考过程（独立于正文展示）
-        else if (type === "thought_message_chunk" || type === "ThoughtMessageChunk") {
+        // 思考过程 — ACP 标准名是 agent_thought_chunk。
+        //
+        // 原先只匹配 thought_message_chunk（当初从文档里猜的名字），
+        // 而 kiro-cli 实际发的是 agent_thought_chunk，于是所有思考内容
+        // 都掉进了兜底分支被丢掉：acp-session.log 里 146081 条
+        // agent_thought_chunk，落到 timeline 的 thought 事件是 0 个。
+        // 表现就是长时间只见工具在滚、没有任何解释性内容。
+        else if (isThoughtChunk(type)) {
           const c = update.content;
           if (!c || Array.isArray(c) || c.type !== "text" || !c.text) return;
           thoughtAccumulated += c.text;
@@ -1527,20 +1589,26 @@ export class KiroCliConnector implements Connector {
           currentToolName = "";
           emitChunk();
         }
-        // 其他类型只写文件日志
-        else {
+        // 其他类型只写文件日志（高频 chunk 除外，见 isHighFrequencyChunk）
+        else if (!isHighFrequencyChunk(type)) {
           fileLog(`[ACP:${type}] ${JSON.stringify(update).slice(0, 300)}`);
         }
       };
 
       // 发送 prompt
       fileLog(`📤 prompt | sessionId: ${this.sessionId} | ${content.length} chars`);
-      const promptResp = await this.sendRequest("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: [{ type: "text", text: content }],
-      });
+      // activePromptId 必须无条件清理：它是「拒绝并发 prompt」的判据，
+      // 任何一条异常出口漏掉都会把这个会话永久卡在「正在应答中」。
+      let promptResp: AcpResponse;
+      try {
+        promptResp = await this.sendRequest("session/prompt", {
+          sessionId: this.sessionId,
+          prompt: [{ type: "text", text: content }],
+        });
+      } finally {
+        this.activePromptId = null;
+      }
 
-      this.activePromptId = null;
       this.notificationHandler = null;
 
       fileLog(`📥 prompt 返回 | error: ${promptResp.error?.message || "null"} | accumulated: ${accumulated.length} chars`);
@@ -1767,6 +1835,17 @@ export class KiroCliConnector implements Connector {
   }
 
   abort(): void {
+    // 【临时诊断】查「任务自行停止」的真实调用方。
+    // 用户反馈只用 Enter 发送、从未点过停止按钮，但每次 cancelled 前都有 abort()，
+    // 而代码里只有停止按钮会调它 —— 说明还有没找到的触发路径。
+    const stack = (new Error().stack || "(无栈)").split("\n").slice(1, 10).map(s => s.trim()).join(" << ");
+    let focus = "(未知)";
+    try {
+      const ae = document.activeElement as HTMLElement | null;
+      focus = ae ? `${ae.tagName}${ae.title ? `[title=${ae.title}]` : ""}${ae.className ? `.${ae.className.slice(0, 40)}` : ""}` : "(无)";
+    } catch {}
+    fileLog(`🔍 abort() 调用栈 | focus: ${focus} | stack: ${stack}`);
+
     fileLog(`abort() | sessionId: ${this.sessionId || "(无)"} | activePromptId: ${this.activePromptId || "(无)"}`);
     if (!this.acpProcess) return;
 
