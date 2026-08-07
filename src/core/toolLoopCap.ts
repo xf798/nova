@@ -24,14 +24,14 @@ export function isToolLoopCapped(loopCount: number, pendingToolCalls: number): b
 }
 
 /**
- * 给正文追加中断说明。
+ * 中断说明文本。
  *
- * 正文为空时说明整条消息只有这句提示，此时不加空行前缀，
- * 避免消息以空白开头。
+ * 只返回提示本身，由 appendNotice 负责同时写进正文和过程时间线 ——
+ * 只写正文的话渲染层看不到（见 appendNotice 的说明）。
  */
-export function withToolLoopCapNotice(content: string, executedTools: number): string {
-  const notice =
+export function toolLoopCapNotice(executedTools: number): string {
+  return (
     `⚠️ 已达工具调用上限（${MAX_TOOL_LOOPS} 轮，共执行 ${executedTools} 个工具），` +
-    `任务未做完就被中断了。回复「继续」可以接着做。`;
-  return content ? `${content}\n\n${notice}` : notice;
+    `任务未做完就被中断了。回复「继续」可以接着做。`
+  );
 }

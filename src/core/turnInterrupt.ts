@@ -27,14 +27,11 @@ export function isTurnInterrupted(content: string): boolean {
 }
 
 /**
- * 追加中断说明。
+ * 中断说明文本。
  *
- * 不删除原句：那是对面 Agent 的原始输出，改写会让日志和界面对不上。
- * 只在后面补一句可操作的说明。
+ * 只返回提示本身，由 appendNotice 负责同时写进正文和过程时间线。
+ * 不改写 Agent 的原句：那是对面的原始输出，改了会让日志与界面对不上。
  */
-export function withTurnInterruptNotice(content: string): string {
-  const notice =
-    "⚠️ 本轮被 Agent 侧中断，任务可能未完成。" +
-    "常见原因是模型额度或工具时间窗口用尽（并非你点了停止）。回复「继续」可以接着做。";
-  return content ? `${content}\n\n${notice}` : notice;
-}
+export const TURN_INTERRUPT_NOTICE =
+  "⚠️ 本轮被 Agent 侧中断，任务可能未完成。" +
+  "常见原因是模型额度或工具时间窗口用尽（并非你点了停止）。回复「继续」可以接着做。";

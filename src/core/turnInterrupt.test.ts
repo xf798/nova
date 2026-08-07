@@ -5,7 +5,7 @@
 // 所以只能靠正文里的这句固定句式识别。
 
 import { describe, it, expect } from "vitest";
-import { isTurnInterrupted, withTurnInterruptNotice } from "./turnInterrupt";
+import { isTurnInterrupted, TURN_INTERRUPT_NOTICE } from "./turnInterrupt";
 
 // 真实样本（截断）
 const REAL = {
@@ -47,18 +47,16 @@ describe("isTurnInterrupted", () => {
   });
 });
 
-describe("withTurnInterruptNotice", () => {
-  it("保留 Agent 原句，只在后面补说明", () => {
-    const out = withTurnInterruptNotice(REAL.afterText);
-    expect(out.startsWith(REAL.afterText)).toBe(true);
-    expect(out).toContain("任务可能未完成");
+describe("TURN_INTERRUPT_NOTICE", () => {
+  it("指出不是用户点的停止，避免误导", () => {
+    expect(TURN_INTERRUPT_NOTICE).toContain("并非你点了停止");
   });
 
-  it("说明里指出不是用户点的停止，避免误导", () => {
-    expect(withTurnInterruptNotice("x")).toContain("并非你点了停止");
+  it("说明任务可能未完成", () => {
+    expect(TURN_INTERRUPT_NOTICE).toContain("任务可能未完成");
   });
 
   it("给出可操作的下一步", () => {
-    expect(withTurnInterruptNotice("x")).toContain("继续");
+    expect(TURN_INTERRUPT_NOTICE).toContain("继续");
   });
 });

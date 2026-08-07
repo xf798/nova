@@ -26,8 +26,9 @@ import {
   stripInlineToolCalls,
   type ToolExecResult,
 } from "./toolExecutor";
-import { MAX_TOOL_LOOPS, isToolLoopCapped, withToolLoopCapNotice } from "./toolLoopCap";
-import { isTurnInterrupted, withTurnInterruptNotice } from "./turnInterrupt";
+import { MAX_TOOL_LOOPS, isToolLoopCapped, toolLoopCapNotice } from "./toolLoopCap";
+import { isTurnInterrupted, TURN_INTERRUPT_NOTICE } from "./turnInterrupt";
+import { appendNotice } from "./appendNotice";
 
 export interface SendMessageParams {
   input: string;
@@ -436,8 +437,10 @@ export async function sendMessage(
   //
   // 放在最后：此时 inline fallback 等对 content 的加工都已完成，
   // 且提示应当出现在正文末尾。
+  // 异常提示统一走 appendNotice：同时写进正文与过程时间线。
+  // 只写正文的话渲染层看不到（MessageItem 有 timeline 时只渲染 timeline）。
   if (cappedByToolLoop) {
-    content = withToolLoopCapNotice(content, allToolResults.length);
+    content = appendNotice(content, mergedTimeline, toolLoopCapNotice(allToolResults.length));
   }
 
   // Agent 侧自行中断本轮时补一句说明。
@@ -446,7 +449,7 @@ export async function sendMessage(
   // 用户只看到任务停在半路却没有任何解释。
   if (isTurnInterrupted(content)) {
     console.warn("[Nova:Send]   ⚠️ 检测到 Agent 侧中断标记，本轮任务可能未完成");
-    content = withTurnInterruptNotice(content);
+    content = appendNotice(content, mergedTimeline, TURN_INTERRUPT_NOTICE);
   }
 
   // 收集 tool 产生的附件（如截图图片路径）

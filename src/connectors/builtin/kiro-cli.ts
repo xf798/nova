@@ -1685,10 +1685,15 @@ export class KiroCliConnector implements Connector {
             }));
           }
           if (thoughtAccumulated) partialMeta.thought = thoughtAccumulated;
+          // 提示必须进 timeline：MessageItem 在有 timeline 时只渲染 timeline，
+          // 只拼到 content 上的话用户什么都看不到 —— 表现就是「说了一句开场白、
+          // 跑了几个工具、然后没有下文」，完全看不出是报错断掉的。
+          const interruptNotice = "\n\n---\n⚠️ *生成中断，以上为部分内容。*";
+          tl.appendText(interruptNotice);
           tl.closeSegment();
           if (!tl.isEmpty) partialMeta.timeline = tl.snapshot();
           return {
-            content: accumulated + "\n\n---\n⚠️ *生成中断，以上为部分内容。*",
+            content: accumulated + interruptNotice,
             sessionId: this.sessionId || undefined,
             meta: partialMeta,
           };
