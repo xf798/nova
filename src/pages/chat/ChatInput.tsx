@@ -6,6 +6,7 @@ import { getWorkspaceDirs } from "../../plugins/builtin/workspace";
 import { bootstrapCommands, dispatchCommand, resolveCommand, runDistill } from "../../core/commands";
 import ConnectorSelector from "./ConnectorSelector";
 import ModelSelector from "./ModelSelector";
+import { SEND_GUARD_MS, showStopButton } from "./sendGuard";
 
 /** 弹 toast（复用 App 的 nova-notify 监听） */
 function toast(msg: string, type: "info" | "success" | "error" = "info") {
@@ -39,9 +40,15 @@ function ChatInput({
   sessionId: string | null;
   totalUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; resourcePoints: number };
 }) {
-  const { activeConnector, hasFullDiskAccess, requestFullDiskAccess } = useAppStore();
+  const { activeConnector, hasFullDiskAccess, requestFullDiskAccess, setPreviewPanel } = useAppStore();
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 发送后的停止保护期，防止紧跟的第二次点击落在停止按钮上
+  const [withinSendGuard, setWithinSendGuard] = useState(false);
+  const sendGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (sendGuardTimerRef.current) clearTimeout(sendGuardTimerRef.current);
+  }, []);
 
   const [input, setInput] = useState(() => chatDrafts.get(sessionId) ?? "");
   const prevSessionRef = useRef<string | null>(sessionId);
@@ -112,6 +119,10 @@ function ChatInput({
 
     setInput("");
     chatDrafts.clear(sessionId);
+    // 开启停止保护期：见 sendGuard，防止紧跟的第二次点击掐掉刚发出的请求
+    setWithinSendGuard(true);
+    if (sendGuardTimerRef.current) clearTimeout(sendGuardTimerRef.current);
+    sendGuardTimerRef.current = setTimeout(() => setWithinSendGuard(false), SEND_GUARD_MS);
     onSend(text);
   };
 
@@ -143,7 +154,18 @@ function ChatInput({
               {attachments.map((path, i) => (
                 <div key={i} className="relative group">
                   {isImage(path) ? (
-                    <img src={convertFileSrc(path)} alt={fileName(path)} className="w-14 h-14 object-cover rounded-xl border border-app-border" />
+                    // 点击走和消息里图片一样的预览面板。
+                    // 用 button 包一层而不是给 img 挂 onClick：键盘可达，
+                    // 且删除按钮叠在上面时点击目标不会互相吞掉。
+                    <button
+                      type="button"
+                      onClick={() => setPreviewPanel({ type: "image", data: path })}
+                      title="点击预览"
+                      aria-label={`预览 ${fileName(path)}`}
+                      className="block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[#10a37f]"
+                    >
+                      <img src={convertFileSrc(path)} alt={fileName(path)} className="w-14 h-14 object-cover rounded-xl border border-app-border cursor-pointer" />
+                    </button>
                   ) : (
                     <div className="h-14 flex items-center gap-2 px-3 bg-app-surface-hover rounded-xl border border-app-border">
                       <span className="text-base">📄</span>
@@ -269,7 +291,12 @@ function ChatInput({
                 </button>
               )}
             </div>
-            {isProcessing && !input.trim() && attachments.length === 0 ? (
+            {showStopButton({
+              isProcessing,
+              hasInput: !!input.trim(),
+              hasAttachments: attachments.length > 0,
+              withinSendGuard,
+            }) ? (
               <button onClick={onAbort}
                 className="w-9 h-9 flex items-center justify-center rounded-full bg-app-text hover:opacity-80 transition-colors" title="停止">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="text-app-bg">
