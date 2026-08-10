@@ -29,6 +29,7 @@ import {
 import { MAX_TOOL_LOOPS, isToolLoopCapped, toolLoopCapNotice } from "./toolLoopCap";
 import { isTurnInterrupted, TURN_INTERRUPT_NOTICE } from "./turnInterrupt";
 import { appendNotice } from "./appendNotice";
+import { buildLanguageDirective } from "./responseLanguage";
 
 export interface SendMessageParams {
   input: string;
@@ -107,6 +108,8 @@ export async function sendMessage(
   // 1. Nova 身份上下文
   // 所有模式都使用相同的精简身份声明（tools 通过 MCP Server 暴露，无需文本列表）
   const novaCtx = generateNovaIdentityPrompt();
+  // 语言约束与 Nova 身份同级：三种上下文模式都要注入，否则换个连接器就失效
+  const langCtx = buildLanguageDirective();
 
   // 2. 确定上下文模式
   const needsHistory =
@@ -137,7 +140,7 @@ export async function sendMessage(
     const ltStable = await longTermMemory.buildStableContext();
     const skillStable = await getStableSkillContext();
     const codingPrompt = getCodingSystemPrompt(cwd);
-    const stableParts = [ltStable, skillStable, codingPrompt, novaCtx].filter(Boolean);
+    const stableParts = [ltStable, skillStable, codingPrompt, novaCtx, langCtx].filter(Boolean);
     const stableCtx = stableParts.length > 0 ? stableParts.join("\n\n") : null;
 
     const ltVariable = await longTermMemory.buildVariableContext(input, recallCtx);
@@ -159,12 +162,12 @@ export async function sendMessage(
     const ltVariable = input.trim()
       ? await longTermMemory.buildVariableContext(input, recallCtx)
       : null;
-    const parts = [novaCtx, ltStable, ltVariable].filter(Boolean);
+    const parts = [novaCtx, langCtx, ltStable, ltVariable].filter(Boolean);
     if (parts.length > 0) memorySupplement = parts.join("\n\n");
     console.log(`[Nova:Send]   ✅ memorySupplement built: ${memorySupplement?.length || 0}chars | ltStable=${ltStable?.length || 0} | ltVariable=${ltVariable?.length || 0} (+${Date.now() - t0}ms)`);
   } else {
-    // 纯透传：仍然注入 Nova 身份
-    memorySupplement = novaCtx;
+    // 纯透传：仍然注入 Nova 身份与语言约束
+    memorySupplement = [novaCtx, langCtx].filter(Boolean).join("\n\n") || undefined;
     console.log(`[Nova:Send]   passthrough: novaCtx=${novaCtx?.length || 0}chars`);
   }
 
