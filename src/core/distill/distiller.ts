@@ -21,6 +21,7 @@ import { buildDistillPrompt, formatDialog, parseDistillResult } from "./prompt";
 import { DEFAULT_DISTILL_CONFIG, emptyDistillResult } from "./types";
 import type { DistillConfig, DistillResult } from "./types";
 import { getDistillConfig } from "./config";
+import { sliceNewMessages, nextWatermark } from "./watermark";
 
 /** 单段字符上限：超过则触发 map-reduce 分段摘要 */
 const MAX_DIALOG_CHARS = 12000;
@@ -46,6 +47,45 @@ interface SessionData {
 /** 从 store 或磁盘取会话消息 + 记忆（非活跃会话可能未加载） */
 async function getSessionData(sessionId: string): Promise<SessionData> {
   const sess = useSessionStore.getState().sessions.find((s) => s.id === sessionId);
+
+  // 必须以磁盘为准，不能用内存里的 messages。
+  //
+  // 内存只保留首屏 20 条（切走会话时还会裁剪回首屏大小），而蒸馏水位线
+  // distilledMsgCount 记的是会话全量对话数。拿 20 条去和水位线 250 比，
+  // start 被钳到 20、slice 恒为空，于是永远判成「无新内容」——
+  // 实测 22 个有水位线的会话全部卡死，其中「客户画像问题修复」磁盘有 227 条、
+  // 水位线 76，151 条新内容永远蒸不到。
+  //
+  // 这与 rewriteMessages 里「内存只有 50 条时覆盖磁盘 140 条」是同一类错误：
+  // 内存是部分视图，任何按总量做的判断都必须回到磁盘。
+  try {
+    // 先探一条拿 total，再按 total 全量读（Rust 侧 offset 从尾部算，
+    // limit 省略会退到默认页大小，所以必须显式给全量）
+    const probe = await sessionStorage.loadMessages(sessionId, 0, 1);
+    const total = probe.total || 0;
+    const result = total > 1 ? await sessionStorage.loadMessages(sessionId, 0, total) : probe;
+    const dialogMessages = (result.messages || []).filter(
+      (m) => m.content !== "$$LOADING$$" && (m.role === "user" || m.role === "assistant"),
+    );
+    if (dialogMessages.length > 0) {
+      // 水位线取磁盘与内存的较大值：store 里可能有尚未落盘的推进，
+      // 取小会导致刚蒸过的内容再蒸一遍
+      const diskWm = result.memory?.distilledMsgCount || 0;
+      const memWm = sess?.memory?.distilledMsgCount || 0;
+      const memory = { ...(result.memory || sess?.memory || { summary: null, summarizedCount: 0 }) };
+      memory.distilledMsgCount = Math.max(diskWm, memWm);
+      if (memory.distilledMsgCount > dialogMessages.length) {
+        console.warn(
+          `[Distill] 水位线 ${memory.distilledMsgCount} 超过磁盘对话数 ${dialogMessages.length}（历史脏数据），按磁盘数处理 | session=${sessionId}`,
+        );
+      }
+      return { id: sessionId, dialogMessages, memory };
+    }
+  } catch (e) {
+    console.warn(`[Distill] 读磁盘失败，回退到内存视图（可能偏保守） | session=${sessionId}`, e);
+  }
+
+  // 磁盘没内容或读失败才用内存兜底（新会话尚未落盘时会走到这里）
   if (sess && sess.messages.length > 0) {
     return {
       id: sessionId,
@@ -55,26 +95,25 @@ async function getSessionData(sessionId: string): Promise<SessionData> {
       memory: sess.memory,
     };
   }
-  try {
-    const result = await sessionStorage.loadMessages(sessionId, 0, 500);
-    return {
-      id: sessionId,
-      dialogMessages: (result.messages || []).filter(
-        (m) => m.content !== "$$LOADING$$" && (m.role === "user" || m.role === "assistant"),
-      ),
-      memory: result.memory,
-    };
-  } catch {
-    return { id: sessionId, dialogMessages: [], memory: undefined };
-  }
+  return { id: sessionId, dialogMessages: [], memory: undefined };
 }
 
-/** 推进会话的蒸馏水位线到 count（写回 SessionMemory） */
+/**
+ * 推进会话的蒸馏水位线到 count（写回 SessionMemory）
+ *
+ * 只前进不后退：count 来自本次读到的对话总数，一旦读到的是部分视图
+ * （磁盘读失败回退内存时会发生），直接覆盖会把 250 写成 20，
+ * 下次就要把 230 条已蒸过的内容再蒸一遍。
+ */
 function advanceWatermark(sessionId: string, count: number): void {
   const store = useSessionStore.getState();
   const sess = store.sessions.find((s) => s.id === sessionId);
   const existing = sess?.memory || { summary: null, summarizedCount: 0 };
-  store.updateMemory(sessionId, { ...existing, distilledMsgCount: count });
+  const next = nextWatermark(existing.distilledMsgCount, count);
+  if (next !== count) {
+    console.warn(`[Distill] 拒绝水位线回退 ${existing.distilledMsgCount} → ${count} | session=${sessionId}`);
+  }
+  store.updateMemory(sessionId, { ...existing, distilledMsgCount: next });
 }
 
 /** map-reduce：把过长对话分段摘要后再拼接 */
@@ -129,10 +168,14 @@ export async function distillSessions(
   for (const id of sessionIds) {
     const data = await getSessionData(id);
     const total = data.dialogMessages.length;
-    const watermark = opts?.force ? 0 : (data.memory?.distilledMsgCount || 0);
-    // 水位线可能大于当前总数（异常），钳制
-    const start = Math.min(Math.max(0, watermark), total);
-    const slice = data.dialogMessages.slice(start);
+    const { slice, clamped } = sliceNewMessages(
+      data.dialogMessages,
+      data.memory?.distilledMsgCount || 0,
+      opts?.force,
+    );
+    if (clamped) {
+      console.warn(`[Distill] 水位线超过对话总数 ${total}，按总数处理 | session=${id}`);
+    }
     if (slice.length > 0) {
       newMessages.push(...slice);
     }
