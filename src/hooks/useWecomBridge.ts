@@ -198,6 +198,13 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
             useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
               msgs.map(m => m.id === assistantMsgId ? { ...m, content: chunk } : m)
             , false);
+          },
+          // 过程流：思考与工具调用走 onMeta，与正文是两条独立通道。
+          // 原先只传了 onChunk，企微会话因此只有文本、看不到思考和工具调用。
+          (meta) => {
+            useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+              msgs.map(m => m.id === assistantMsgId ? { ...m, meta } : m)
+            , false);
           }
         );
 
@@ -205,7 +212,7 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
 
         const replyContent = result.content || "（无输出）";
         useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
-          msgs.map(m => m.id === assistantMsgId ? { ...m, content: replyContent } : m)
+          msgs.map(m => m.id === assistantMsgId ? { ...m, content: replyContent, meta: result.meta } : m)
         );
 
         // 回复到企微
