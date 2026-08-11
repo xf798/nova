@@ -32,8 +32,7 @@ function resolveBackend(
   return cliFallback ?? activeConn;
 }
 
-describe("后端解析", () => {
-  it("企微会话（connectorId=wecom-bot）回落到 cli，因此能切模型", () => {
+describe("后端解析", () => {  it("企微会话（connectorId=wecom-bot）回落到 cli，因此能切模型", () => {
     const b = resolveBackend(BOT, BOT, CLI);
     expect(b.id).toBe("kiro-cli");
     expect(b.supportsModelSwitch).toBe(true);
@@ -66,5 +65,59 @@ describe("后端解析", () => {
     for (const active of [CLI, API]) {
       expect(resolveBackend(BOT, active, CLI).type).not.toBe("bot");
     }
+  });
+});
+
+// ===== 切换连接器后的模型归属 =====
+//
+// 实际 bug：切到别的连接器后，模型选择器仍显示上一个连接器的模型。
+// 三处成因：
+//   1. session.modelId 是旧连接器的模型，切换时没清（按钮回显它）
+//   2. 下拉列表只在 models.length === 0 时加载，切换后不刷新
+//   3. 无会话时 pendingModel 里的暂存值同样属于旧连接器
+// 留着旧 modelId 不只是显示问题：发送时会把它 setModel 给新连接器。
+
+/** 复刻 ConnectorSelector 切换后写回的会话字段 */
+function metaAfterSwitch(newConnectorId: string): { connectorId: string; modelId: string | undefined } {
+  return { connectorId: newConnectorId, modelId: undefined };
+}
+
+/** 复刻按钮回显：session.modelId → pendingSelection → Auto */
+function displayModel(sessionModelId?: string, pendingSelection?: string): string {
+  return sessionModelId || pendingSelection || "auto";
+}
+
+/** 复刻列表缓存判定：只有「已加载的后端」与当前后端一致才复用 */
+function shouldReloadModels(loadedFor: string | null, backendId: string): boolean {
+  return loadedFor !== backendId;
+}
+
+describe("切换连接器后的模型归属", () => {
+  it("切换后清掉会话上的旧模型，回显回到 Auto", () => {
+    const meta = metaAfterSwitch("glm-4");
+    expect(meta.connectorId).toBe("glm-4");
+    expect(meta.modelId).toBeUndefined();
+    expect(displayModel(meta.modelId, undefined)).toBe("auto");
+  });
+
+  it("不清的话会回显旧连接器的模型（修复前的表现）", () => {
+    expect(displayModel("claude-sonnet-5", undefined)).toBe("claude-sonnet-5");
+  });
+
+  it("无会话时暂存值也要清，否则同样串台", () => {
+    expect(displayModel(undefined, undefined)).toBe("auto");
+    expect(displayModel(undefined, "claude-sonnet-5")).toBe("claude-sonnet-5");
+  });
+
+  it("后端变化时必须重新拉模型列表", () => {
+    expect(shouldReloadModels("kiro-cli", "glm-4")).toBe(true);
+  });
+
+  it("同一后端复用缓存，不重复请求", () => {
+    expect(shouldReloadModels("kiro-cli", "kiro-cli")).toBe(false);
+  });
+
+  it("首次打开（未加载过）要拉列表", () => {
+    expect(shouldReloadModels(null, "kiro-cli")).toBe(true);
   });
 });

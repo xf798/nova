@@ -1,6 +1,7 @@
 import { useAppStore } from "../../App";
 import { connectorRegistry } from "../../connectors";
 import { useSessionStore } from "../../core/sessionStore";
+import { pendingModel } from "../../core/pendingModel";
 
 function ConnectorSelector() {
   const { activeConnector, setActiveConnectorId } = useAppStore();
@@ -8,11 +9,19 @@ function ConnectorSelector() {
   const connectors = connectorRegistry.getEnabled().filter(c => c.config.type !== "bot");
 
   const handleSwitch = (id: string) => {
+    if (id === activeConnector.config.id) return;
     setActiveConnectorId(id);
-    // 同步更新当前会话的 connectorId
+    // 同步更新当前会话的 connectorId，并清掉已选模型。
+    //
+    // modelId 是上一个连接器的模型（如 kiro-cli 的 claude-sonnet-5），
+    // 在新连接器里不存在。留着会有两个后果：模型选择器回显一个不属于
+    // 当前连接器的名字，发送时还会把它 setModel 给新连接器。
+    // 回落到 Auto 最可预期，让用户重新选。
     if (activeSessionId) {
-      useSessionStore.getState().updateMeta(activeSessionId, { connectorId: id });
+      useSessionStore.getState().updateMeta(activeSessionId, { connectorId: id, modelId: undefined });
     }
+    // 无会话时选择暂存在 pendingModel 里，同样属于旧连接器
+    pendingModel.clear();
   };
 
   if (connectors.length <= 1) {

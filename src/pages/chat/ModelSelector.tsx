@@ -18,6 +18,8 @@ function ModelSelector() {
   const [loading, setLoading] = useState(false);
   /** 无会话时选的模型（会话创建后由 ensureSession 落地），仅用于按钮回显 */
   const [pendingSelection, setPendingSelection] = useState<string | undefined>(() => pendingModel.get());
+  /** models 是为哪个后端加载的，后端变了要重新拉 */
+  const loadedForRef = useRef<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // 会话建好后暂存值已被消费，回显交回 session
@@ -50,20 +52,34 @@ function ModelSelector() {
     return connectorRegistry.getByType("cli")[0] ?? activeConnector;
   })();
 
-  if (!backend.capabilities.supportsModelSwitch) return null;
+  // 切换后端后，按钮上回显的暂存模型属于旧连接器，清掉回到 Auto。
+  // （有会话时由 ConnectorSelector 清 session.modelId，这里管无会话的场景）
+  const prevBackendRef = useRef<string | null>(null);
+  useEffect(() => {
+    const id = backend.config.id;
+    if (prevBackendRef.current === null) { prevBackendRef.current = id; return; }
+    if (prevBackendRef.current === id) return;
+    prevBackendRef.current = id;
+    setPendingSelection(undefined);
+  }, [backend.config.id]);
 
+  if (!backend.capabilities.supportsModelSwitch) return null;
   // 无会话时用暂存值回显，避免选了却显示 Auto
   const currentModel = sessionModelId || pendingSelection || "auto";
 
   const handleOpen = async () => {
     if (isOpen) { setIsOpen(false); return; }
     setIsOpen(true);
-    if (models.length === 0) {
+    // 列表按后端缓存：原先只判断 models.length === 0，加载过一次就再也不刷新，
+    // 切到别的连接器后下拉里列的还是上一个连接器的模型。
+    if (loadedForRef.current !== backend.config.id) {
       setLoading(true);
+      setModels([]);
       try {
         // 用真实后端列模型：wecom-bot 没有 listModels
         const result = await backend.listModels!();
         setModels(result.models);
+        loadedForRef.current = backend.config.id;
       } catch {}
       setLoading(false);
     }
