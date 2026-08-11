@@ -32,6 +32,8 @@
         "title": "Nova",
         "width": 1100,
         "height": 700,
+        "minWidth": 800,
+        "minHeight": 520,
         "resizable": true,
         "fullscreen": false,
         "titleBarStyle": "Overlay",

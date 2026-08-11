@@ -200,7 +200,7 @@ function ChatInput({
 
 
           <div className="flex items-center justify-between px-3 pb-2.5">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 min-w-0">
               <ConnectorSelector />
               <ModelSelector />
               <div className="relative">
@@ -298,14 +298,14 @@ function ChatInput({
               withinSendGuard,
             }) ? (
               <button onClick={onAbort}
-                className="w-9 h-9 flex items-center justify-center rounded-full bg-app-text hover:opacity-80 transition-colors" title="停止">
+                className="shrink-0 w-9 h-9 flex items-center justify-center rounded-full bg-app-text hover:opacity-80 transition-colors" title="停止">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="text-app-bg">
                   <rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor" />
                 </svg>
               </button>
             ) : (
               <button onClick={handleSend} disabled={!input.trim() && attachments.length === 0}
-                className="w-9 h-9 flex items-center justify-center bg-app-text disabled:bg-app-border disabled:cursor-not-allowed rounded-full transition-colors"
+                className="shrink-0 w-9 h-9 flex items-center justify-center bg-app-text disabled:bg-app-border disabled:cursor-not-allowed rounded-full transition-colors"
                 title={isProcessing ? "加入队列（回答结束后自动发送）" : "发送"}>
                 {isProcessing ? (
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-app-bg">
