@@ -205,6 +205,12 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
             useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
               msgs.map(m => m.id === assistantMsgId ? { ...m, meta } : m)
             , false);
+          },
+          // 召回明细走第五个参数，在请求发出前就已确定
+          (recall) => {
+            useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+              msgs.map(m => m.id === assistantMsgId ? { ...m, recall } : m)
+            , false);
           }
         );
 
@@ -212,7 +218,23 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
 
         const replyContent = result.content || "（无输出）";
         useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
-          msgs.map(m => m.id === assistantMsgId ? { ...m, content: replyContent, meta: result.meta } : m)
+          msgs.map(m => m.id === assistantMsgId ? {
+            ...m,
+            content: replyContent,
+            // 合并而非覆盖：流式期间写入的 thought/timeline 比 result.meta 更完整，
+            // 直接覆盖会只剩 toolCalls，思考过程凭空消失
+            meta: {
+              ...(m.meta || {}),
+              ...(result.meta || {}),
+              timeline: (result.meta?.timeline && result.meta.timeline.length > 0)
+                ? result.meta.timeline
+                : (m.meta as any)?.timeline,
+            },
+            // 召回已由 onRecall 提前写入，这里不要覆盖成 undefined
+            recall: result.recall && (result.recall.memories.length > 0 || result.recall.skills.length > 0)
+              ? result.recall
+              : m.recall,
+          } : m)
         );
 
         // 回复到企微
