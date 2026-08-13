@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import ImagePreviewWindow from "./pages/image-preview/ImagePreviewWindow";
 import "./index.css";
 
 declare global {
@@ -42,8 +43,10 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+const imagePreviewPath = new URLSearchParams(window.location.search).get("imagePreview");
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <ErrorBoundary>
-    <App />
+    {imagePreviewPath ? <ImagePreviewWindow initialPath={imagePreviewPath} /> : <App />}
   </ErrorBoundary>
 );

@@ -30,6 +30,13 @@ export interface RecallInfo {
   estimated?: boolean;
 }
 
+export interface MessageOrigin {
+  channel: "desktop" | "wecom";
+  senderId?: string;
+  senderName?: string;
+  requestId?: string;
+}
+
 // 消息
 export interface Message {
   id: string;
@@ -45,6 +52,8 @@ export interface Message {
   quotedMessage?: QuotedMessage;
   /** 召回明细（可观测：本次注入的记忆/技能） */
   recall?: RecallInfo;
+  /** 消息来自哪个入口；缺省视为桌面端历史消息 */
+  origin?: MessageOrigin;
 }
 
 // 会话
@@ -62,6 +71,8 @@ export interface ChatSession {
   pinned?: boolean;
   /** Per-session 模型选择（覆盖连接器默认模型） */
   modelId?: string;
+  /** Per-session 工作目录，供桌面与外部入口复用 */
+  workspace?: string;
   /**
    * messages 是否已从磁盘加载。
    *

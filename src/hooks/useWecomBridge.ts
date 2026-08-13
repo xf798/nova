@@ -8,6 +8,9 @@ import { sendMessage } from "../core/sendMessage";
 import { applyWecomInterceptors } from "../core/wecomInterceptor";
 import { checkWecomGuard } from "../core/wecomGuard";
 import { checkWecomAccess, parseWecomPolicy, rememberSender } from "../core/wecomPolicy";
+import { channelBindings, resolveBindingTarget } from "../core/channelBindings";
+import { resolveSessionContext } from "../core/sessionContext";
+import { sessionTurnQueue } from "../core/sessionTurnQueue";
 
 interface UseWecomBridgeParams {
   activeConnectorRef: MutableRefObject<Connector>;
@@ -118,7 +121,7 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
 
       messageQueue.push(async () => {
 
-      const wecomSessionId = `wecom-${msg.chat_id}`;
+      const channelSessionId = `wecom-${msg.chat_id}`;
       const userMsgId = `msg-${Date.now()}-wecom-user`;
       const assistantMsgId = `msg-${Date.now()}-wecom-assistant`;
 
@@ -134,81 +137,117 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
         }
       }
 
-      // 查找或创建企微会话，然后统一通过 updateMessages 添加消息
+      // 企微入口会话始终保留，供桌面端管理绑定；消息按绑定路由到目标 Nova 会话。
       const store = useSessionStore.getState();
-      const existing = store.sessions.find(s => s.id === wecomSessionId);
+      const activeConn = activeConnectorRef.current;
+      const fallbackConnector =
+        activeConn && (activeConn.config.type === "cli" || activeConn.config.type === "api")
+          ? activeConn
+          : connectorRegistry.getByType("cli")[0];
+      const existing = store.sessions.find(s => s.id === channelSessionId);
       if (!existing) {
         const chatLabel = msg.text.slice(0, 20) || "新会话";
         store.createSession({
-          id: wecomSessionId,
+          id: channelSessionId,
           title: `[${botName}] ${chatLabel}`,
-          connectorId: activeConnectorRef.current?.config?.id || "wecom-bot",
+          connectorId: fallbackConnector?.config.id || "wecom-bot",
           connectorSessionId: null,
         });
       }
-      useSessionStore.getState().updateMessages(wecomSessionId, (msgs) => [
+
+      const binding = await channelBindings.get("wecom", channelSessionId);
+      const route = resolveBindingTarget(
+        channelSessionId,
+        binding,
+        useSessionStore.getState().sessions.map(session => session.id),
+      );
+      if (route.invalidBinding && binding) {
+        console.warn(`[WeCom] 绑定目标已不存在，自动解绑: ${binding.targetSessionId}`);
+        await channelBindings.unbind("wecom", channelSessionId);
+      }
+      const targetSessionId = route.targetSessionId;
+
+      await sessionTurnQueue.enqueue(targetSessionId, async () => {
+      const targetSession = useSessionStore.getState().sessions.find(session => session.id === targetSessionId)!;
+      const context = await resolveSessionContext(targetSessionId).catch(error => {
+        console.warn(`[WeCom] 读取完整会话上下文失败，回退内存上下文: ${targetSessionId}`, error);
+        return {
+          messages: targetSession.messages.filter(message => message.content !== "$$LOADING$$"),
+          memory: targetSession.memory,
+          modelId: targetSession.modelId,
+          connectorId: targetSession.connectorId,
+          connectorSessionId: targetSession.connectorSessionId || undefined,
+          workspace: targetSession.workspace,
+        };
+      });
+      const userOrigin = {
+        channel: "wecom" as const,
+        senderId: msg.sender_id,
+        senderName: msg.sender_name,
+        requestId: msg.request_id,
+      };
+      const assistantOrigin = { channel: "wecom" as const, requestId: msg.request_id };
+      useSessionStore.getState().updateMessages(targetSessionId, (msgs) => [
         ...msgs,
-        { id: userMsgId, role: "user" as const, content: msg.text, timestamp: new Date().toISOString() },
-        { id: assistantMsgId, role: "assistant" as const, content: "$$LOADING$$", timestamp: new Date().toISOString() },
+        { id: userMsgId, role: "user" as const, content: msg.text, timestamp: new Date().toISOString(), origin: userOrigin },
+        { id: assistantMsgId, role: "assistant" as const, content: "$$LOADING$$", timestamp: new Date().toISOString(), origin: assistantOrigin },
       ]);
 
       // 通过统一发送层处理
       try {
-        // 解析对话后端：优先当前活跃连接器（cli/api），bot 类型不能作为后端，回落到 cli
-        const activeConn = activeConnectorRef.current;
-        const baseConnector =
-          activeConn && (activeConn.config.type === "cli" || activeConn.config.type === "api")
-            ? activeConn
-            : connectorRegistry.getByType("cli")[0];
+        // 绑定后优先使用目标会话自己的连接器；不可用时才回落当前桌面连接器。
+        const configuredConnector = context.connectorId ? connectorRegistry.get(context.connectorId) : null;
+        const baseConnector = configuredConnector?.config.enabled
+          && (configuredConnector.config.type === "cli" || configuredConnector.config.type === "api")
+          ? configuredConnector
+          : fallbackConnector;
         if (!baseConnector) throw new Error("没有可用的对话连接器");
 
-        const connector = connectorInstances.getOrCreate(wecomSessionId, baseConnector);
-        connectorInstances.markBusy(wecomSessionId, baseConnector.config.id);
+        const connector = connectorInstances.getOrCreate(
+          targetSessionId,
+          baseConnector,
+          baseConnector.config.type === "cli"
+            ? { cwd: context.workspace || baseConnector.config.cwd }
+            : undefined,
+        );
+        connectorInstances.markBusy(targetSessionId, baseConnector.config.id);
 
-        const curSession = useSessionStore.getState().sessions.find(s => s.id === wecomSessionId);
-
-        // Per-session 模型选择。
-        //
-        // 正常发送路径（ChatView）会在发送前 setModel(session.modelId)，
-        // 企微这条路原先漏了，导致在企微会话里切了模型也不生效。
-        const sessionModelId = curSession?.modelId;
+        const sessionModelId = context.modelId;
         if (sessionModelId && sessionModelId !== "auto" && connector.setModel) {
           connector.setModel(sessionModelId);
           console.log(`[WeCom] 🎯 Per-session 模型: "${sessionModelId}"`);
         }
 
-        const connectorSessionId = curSession?.connectorSessionId || undefined;
-        const sessionMessages = (curSession?.messages || []).filter(m => m.content !== "$$LOADING$$");
-
-        console.log(`[WeCom] 会话上下文: wecomSessionId=${wecomSessionId}, connectorSessionId=${connectorSessionId || "(新会话)"}, historyMsgCount=${sessionMessages.length}`);
+        console.log(`[WeCom] 会话上下文: channelSessionId=${channelSessionId}, targetSessionId=${targetSessionId}, connectorSessionId=${context.connectorSessionId || "(新会话)"}, historyMsgCount=${context.messages.length}, workspace=${context.workspace || "(默认)"}`);
 
         const result = await sendMessage(
           {
             input: msg.text,
             connector,
-            sessionId: connectorSessionId,
-            sessionMessages,
-            sessionMemory: curSession?.memory,
-            cwd: "/Users/wangxf/workspace",
+            sessionId: context.connectorSessionId,
+            sessionMessages: context.messages,
+            sessionMemory: context.memory,
+            cwd: context.workspace || baseConnector.config.cwd,
+            workspace: context.workspace,
             onSessionCreated: (newSessionId: string) => {
-              useSessionStore.getState().updateMeta(wecomSessionId, { connectorSessionId: newSessionId });
+              useSessionStore.getState().updateMeta(targetSessionId, { connectorSessionId: newSessionId });
             },
           },
           (chunk: string) => {
-            useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+            useSessionStore.getState().updateMessages(targetSessionId, (msgs) =>
               msgs.map(m => m.id === assistantMsgId ? { ...m, content: chunk } : m)
             , false);
           },
           // 过程流：思考与工具调用走 onMeta，与正文是两条独立通道。
           // 原先只传了 onChunk，企微会话因此只有文本、看不到思考和工具调用。
           (meta) => {
-            useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+            useSessionStore.getState().updateMessages(targetSessionId, (msgs) =>
               msgs.map(m => m.id === assistantMsgId ? { ...m, meta } : m)
             , false);
           },
           // 召回明细走第五个参数，在请求发出前就已确定
           (recall) => {
-            useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+            useSessionStore.getState().updateMessages(targetSessionId, (msgs) =>
               msgs.map(m => m.id === assistantMsgId ? { ...m, recall } : m)
             , false);
           }
@@ -217,7 +256,7 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
         dbg(`[WeCom] sendMessage返回 | content长度=${result.content?.length || 0}`);
 
         const replyContent = result.content || "（无输出）";
-        useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+        useSessionStore.getState().updateMessages(targetSessionId, (msgs) =>
           msgs.map(m => m.id === assistantMsgId ? {
             ...m,
             content: replyContent,
@@ -252,20 +291,20 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
             }
           }
         }
-        connectorInstances.markIdle(wecomSessionId);
+        connectorInstances.markIdle(targetSessionId);
 
       } catch (e: any) {
-        connectorInstances.markIdle(wecomSessionId);
+        connectorInstances.markIdle(targetSessionId);
         if (e.message?.includes("connector disposed")) {
           console.log('[WeCom] ⏭️ 忽略 disposed connector 错误');
-          useSessionStore.getState().updateMessages(wecomSessionId, (msgs) => msgs.filter(m => m.id !== assistantMsgId));
+          useSessionStore.getState().updateMessages(targetSessionId, (msgs) => msgs.filter(m => m.id !== assistantMsgId));
           return;
         }
 
         const errMsg = `😵 处理失败: ${e.message || e}`;
         console.error("[WeCom] 处理消息失败:", e);
 
-        useSessionStore.getState().updateMessages(wecomSessionId, (msgs) =>
+        useSessionStore.getState().updateMessages(targetSessionId, (msgs) =>
           msgs.map(m => m.id === assistantMsgId ? { ...m, content: errMsg } : m)
         );
 
@@ -274,6 +313,7 @@ export function useWecomBridge({ activeConnectorRef }: UseWecomBridgeParams) {
           await botConn2.replyMessage(msg.request_id, errMsg, msg.response_url).catch(() => {});
         }
       }
+      }); // end sessionTurnQueue.enqueue
       }); // end messageQueue.push
 
       processQueue();

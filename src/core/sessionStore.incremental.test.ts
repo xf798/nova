@@ -17,6 +17,7 @@ const appendMessages = vi.fn();
 const writePartial = vi.fn();
 const saveMeta = vi.fn();
 const dropTrailing = vi.fn();
+const deleteMessage = vi.fn();
 
 vi.mock("./sessionStorage", () => ({
   sessionStorage: {
@@ -27,6 +28,7 @@ vi.mock("./sessionStorage", () => ({
     writePartial: (...a: unknown[]) => writePartial(...a),
     saveMeta: (...a: unknown[]) => saveMeta(...a),
     dropTrailing: (...a: unknown[]) => dropTrailing(...a),
+    deleteMessage: (...a: unknown[]) => deleteMessage(...a),
     rewriteMessages: vi.fn().mockResolvedValue(undefined),
     clearPartial: vi.fn().mockResolvedValue(undefined),
     deleteFromDisk: vi.fn().mockResolvedValue(undefined),
@@ -69,6 +71,7 @@ beforeEach(() => {
   writePartial.mockResolvedValue(undefined);
   saveMeta.mockResolvedValue(undefined);
   dropTrailing.mockResolvedValue(undefined);
+  deleteMessage.mockResolvedValue({ deleted: true, lastPersistedId: "a", total: 2 });
   useSessionStore.setState({ sessions: [], activeSessionId: null, loaded: false, pagination: {} });
 });
 
@@ -231,6 +234,83 @@ describe("dropTrailingMessages — 重试时同步删除磁盘内容", () => {
     // 被截断的旧消息不该复活
     expect(appended).not.toContain("b");
     expect(appended).not.toContain("c");
+  });
+});
+
+describe("deleteMessage — 按 ID 删除单条消息", () => {
+  it("先落盘再删除，并同步内存与分页总数", async () => {
+    mockIndex.mockResolvedValue([meta("s1")]);
+    mockLoadMessages.mockResolvedValue({
+      messages: [msg("a"), msg("b"), msg("c", "assistant")],
+      total: 8,
+      partialIncluded: false,
+    });
+    await useSessionStore.getState().init();
+
+    deleteMessage.mockResolvedValueOnce({ deleted: true, lastPersistedId: "c", total: 7 });
+    const ok = await useSessionStore.getState().deleteMessage("s1", "b");
+
+    expect(ok).toBe(true);
+    expect(deleteMessage).toHaveBeenCalledWith("s1", "b");
+    // 纯历史删除没有待落盘内容，不应把已在 JSONL 的末条再复制到 partial。
+    expect(writePartial).not.toHaveBeenCalled();
+    const state = useSessionStore.getState();
+    expect(state.sessions.find(s => s.id === "s1")!.messages.map(m => m.id)).toEqual(["a", "c"]);
+    expect(state.pagination.s1).toEqual({ loadedOffset: 2, total: 7 });
+  });
+
+  it("存在防抖中的新增消息时先刷盘再删除", async () => {
+    mockIndex.mockResolvedValue([meta("s1")]);
+    mockLoadMessages.mockResolvedValue({
+      messages: [msg("a")], total: 1, partialIncluded: false,
+    });
+    await useSessionStore.getState().init();
+    useSessionStore.getState().updateMessages("s1", m => [...m, msg("b"), msg("c", "assistant")]);
+
+    deleteMessage.mockResolvedValueOnce({ deleted: true, lastPersistedId: "a", total: 2 });
+    await useSessionStore.getState().deleteMessage("s1", "b");
+
+    expect((appendMessages.mock.calls[0][1] as Message[]).map(m => m.id)).toEqual(["b"]);
+    expect((writePartial.mock.calls[0][1] as Message).id).toBe("c");
+    expect(deleteMessage).toHaveBeenCalledWith("s1", "b");
+  });
+
+  it("磁盘删除失败时不改内存", async () => {
+    mockIndex.mockResolvedValue([meta("s1")]);
+    mockLoadMessages.mockResolvedValue({
+      messages: [msg("a"), msg("b")], total: 2, partialIncluded: false,
+    });
+    await useSessionStore.getState().init();
+
+    deleteMessage.mockRejectedValueOnce(new Error("io error"));
+    const ok = await useSessionStore.getState().deleteMessage("s1", "b");
+
+    expect(ok).toBe(false);
+    expect(useSessionStore.getState().sessions.find(s => s.id === "s1")!.messages.map(m => m.id))
+      .toEqual(["a", "b"]);
+  });
+
+  it("删除对话消息时清空可能包含该正文的会话摘要", async () => {
+    mockIndex.mockResolvedValue([meta("s1")]);
+    mockLoadMessages.mockResolvedValue({
+      messages: [msg("a"), msg("b", "assistant")], total: 2, partialIncluded: false,
+      memory: {
+        summary: "包含 b 的旧摘要",
+        summarizedCount: 2,
+        summaryChain: [{ summary: "旧摘要", startIndex: 0, endIndex: 2, createdAt: "x", segmentIndex: 1 }],
+        distilledMsgCount: 2,
+      },
+    });
+    await useSessionStore.getState().init();
+
+    deleteMessage.mockResolvedValueOnce({ deleted: true, lastPersistedId: "a", total: 1 });
+    await useSessionStore.getState().deleteMessage("s1", "b");
+
+    const memory = useSessionStore.getState().sessions.find(s => s.id === "s1")!.memory!;
+    expect(memory.summary).toBeNull();
+    expect(memory.summarizedCount).toBe(0);
+    expect(memory.summaryChain).toEqual([]);
+    expect(memory.distilledMsgCount).toBe(2);
   });
 });
 

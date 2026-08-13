@@ -4,6 +4,7 @@ import { sessionStorage } from "./sessionStorage";
 import { chatDrafts } from "./chatDrafts";
 import { chatAttachments } from "./chatAttachments";
 import { markClick, markStore, markData } from "./switchProfiler";
+import { channelBindings } from "./channelBindings";
 
 
 export interface SessionMeta {
@@ -16,6 +17,8 @@ export interface SessionMeta {
   pinned?: boolean;
   /** Per-session 模型选择 */
   modelId?: string;
+  /** Per-session 工作目录 */
+  workspace?: string;
 }
 
 interface PaginationInfo {
@@ -39,7 +42,9 @@ interface SessionState {
    * 减少消息会让持久化锚点失效，磁盘上的那几条不会被删掉。
    */
   dropTrailingMessages: (sessionId: string, count: number) => Promise<void>;
-  updateMeta: (sessionId: string, metaUpdate: Partial<Pick<SessionMeta, "title" | "connectorId" | "connectorSessionId" | "pinned">> & { modelId?: string }) => void;
+  /** 按 ID 删除单条消息；仅在磁盘删除成功后更新内存 */
+  deleteMessage: (sessionId: string, messageId: string) => Promise<boolean>;
+  updateMeta: (sessionId: string, metaUpdate: Partial<Pick<SessionMeta, "title" | "connectorId" | "connectorSessionId" | "pinned" | "modelId" | "workspace">>) => void;
   updateMemory: (sessionId: string, memory: any) => void;
   switchSession: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
@@ -49,6 +54,8 @@ interface SessionState {
 }
 
 const saveTimers: Map<string, number> = new Map();
+/** 串行化同一会话的持久化，避免刷新待落盘消息与删除操作交叉 */
+const persistQueues: Map<string, Promise<void>> = new Map();
 
 /**
  * 记录每个会话已追加进 jsonl 的最后一条消息 id。
@@ -81,6 +88,7 @@ function metaOf(session: ChatSession) {
     connectorId: session.connectorId,
     connectorSessionId: session.connectorSessionId,
     modelId: session.modelId,
+    workspace: session.workspace ?? null,
     pinned: session.pinned,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -102,56 +110,89 @@ function metaOf(session: ChatSession) {
  *
  * $$LOADING$$ 占位消息不落盘。
  */
+async function persistSessionNow(sessionId: string): Promise<void> {
+  const session = useSessionStore.getState().sessions.find(s => s.id === sessionId);
+  if (!session) return;
+
+  const msgs = session.messages.filter(m => m.content !== LOADING_PLACEHOLDER);
+  if (msgs.length === 0) {
+    // 会话可能只有占位消息；meta 仍需落盘（新建会话的标题等）
+    await sessionStorage.saveMeta(sessionId, metaOf(session)).catch(e =>
+      console.warn("[SessionStore] saveMeta 失败:", e));
+    return;
+  }
+
+  const lastId = persistedLastId.get(sessionId) ?? null;
+  // 找到已持久化位置：其后到倒数第二条是本次要 append 的
+  const idx = lastId === null ? -1 : msgs.findIndex(m => m.id === lastId);
+
+  if (lastId !== null && idx === -1) {
+    // 已持久化的那条在内存里找不到 —— 说明历史被编辑/删除过。
+    // 此时不能 append（会重复），只能重写；而内存未必持有全量，
+    // 交给显式的 rewriteMessages 路径处理，这里只更新 meta 以免误伤数据。
+    console.warn(
+      `[SessionStore] 会话 ${sessionId} 的持久化锚点丢失，跳过消息落盘（请走 rewriteMessages）`
+    );
+    await sessionStorage.saveMeta(sessionId, metaOf(session)).catch(e =>
+      console.warn("[SessionStore] saveMeta 失败:", e));
+    return;
+  }
+
+  const last = msgs[msgs.length - 1];
+  const toAppend = msgs.slice(idx + 1, msgs.length - 1);
+
+  try {
+    if (toAppend.length > 0) {
+      await sessionStorage.appendMessages(sessionId, toAppend, metaOf(session));
+      persistedLastId.set(sessionId, toAppend[toAppend.length - 1].id);
+    } else {
+      await sessionStorage.saveMeta(sessionId, metaOf(session));
+    }
+    // 末条若就是当前 JSONL 锚点，说明它早已定稿，不能再复制到 partial。
+    // 真正新增/流式中的末条位于锚点之后，才需要写 partial。
+    if (last.id !== lastId) {
+      await sessionStorage.writePartial(sessionId, last);
+    }
+  } catch (e) {
+    console.warn("[SessionStore] 增量落盘失败:", e);
+  }
+}
+
+/** 同一会话的写盘串行执行，返回本次写盘 Promise 供删除前等待 */
+function enqueuePersist(sessionId: string): Promise<void> {
+  const previous = persistQueues.get(sessionId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => persistSessionNow(sessionId));
+  persistQueues.set(sessionId, current);
+  void current.finally(() => {
+    if (persistQueues.get(sessionId) === current) persistQueues.delete(sessionId);
+  });
+  return current;
+}
+
 function debouncedSave(sessionId: string, delay: number = 1000): void {
   const existing = saveTimers.get(sessionId);
   if (existing) clearTimeout(existing);
 
-  const timer = window.setTimeout(async () => {
+  const timer = window.setTimeout(() => {
     saveTimers.delete(sessionId);
-    const session = useSessionStore.getState().sessions.find(s => s.id === sessionId);
-    if (!session) return;
-
-    const msgs = session.messages.filter(m => m.content !== LOADING_PLACEHOLDER);
-    if (msgs.length === 0) {
-      // 会话可能只有占位消息；meta 仍需落盘（新建会话的标题等）
-      await sessionStorage.saveMeta(sessionId, metaOf(session)).catch(e =>
-        console.warn("[SessionStore] saveMeta 失败:", e));
-      return;
-    }
-
-    const lastId = persistedLastId.get(sessionId) ?? null;
-    // 找到已持久化位置：其后到倒数第二条是本次要 append 的
-    const idx = lastId === null ? -1 : msgs.findIndex(m => m.id === lastId);
-
-    if (lastId !== null && idx === -1) {
-      // 已持久化的那条在内存里找不到 —— 说明历史被编辑/删除过。
-      // 此时不能 append（会重复），只能重写；而内存未必持有全量，
-      // 交给显式的 rewriteMessages 路径处理，这里只更新 meta 以免误伤数据。
-      console.warn(
-        `[SessionStore] 会话 ${sessionId} 的持久化锚点丢失，跳过消息落盘（请走 rewriteMessages）`
-      );
-      await sessionStorage.saveMeta(sessionId, metaOf(session)).catch(e =>
-        console.warn("[SessionStore] saveMeta 失败:", e));
-      return;
-    }
-
-    const last = msgs[msgs.length - 1];
-    const toAppend = msgs.slice(idx + 1, msgs.length - 1);
-
-    try {
-      if (toAppend.length > 0) {
-        await sessionStorage.appendMessages(sessionId, toAppend, metaOf(session));
-        persistedLastId.set(sessionId, toAppend[toAppend.length - 1].id);
-      } else {
-        await sessionStorage.saveMeta(sessionId, metaOf(session));
-      }
-      // 最后一条可能还在生成，写 partial 而非 jsonl
-      await sessionStorage.writePartial(sessionId, last);
-    } catch (e) {
-      console.warn("[SessionStore] 增量落盘失败:", e);
-    }
+    void enqueuePersist(sessionId);
   }, delay);
   saveTimers.set(sessionId, timer);
+}
+
+/** 删除前把尚在防抖队列中的消息先写盘，避免刚删除又被延迟写回 */
+async function flushPendingSave(sessionId: string): Promise<void> {
+  const pending = saveTimers.get(sessionId);
+  if (pending) {
+    clearTimeout(pending);
+    saveTimers.delete(sessionId);
+    await enqueuePersist(sessionId);
+    return;
+  }
+  // 没有待写内容时不能强制 persist：刚加载的末条已在 JSONL，
+  // 再写 partial 会把同一条消息复制一份。这里只等待已经开始的写盘。
+  const inFlight = persistQueues.get(sessionId);
+  if (inFlight) await inFlight;
 }
 
 /** 只更新 meta（标题/置顶等），不动消息 */
@@ -226,6 +267,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       updatedAt: meta.updatedAt,
       pinned: meta.pinned || false,
       modelId: meta.modelId || undefined,
+      workspace: meta.workspace || undefined,
       // 索引里没有消息，需按需从磁盘加载
       messagesLoaded: false,
     }));
@@ -275,6 +317,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       messages: [],
       createdAt: now,
       updatedAt: now,
+      modelId: meta.modelId,
+      workspace: meta.workspace,
+      pinned: meta.pinned,
       // 新建会话无历史可加载，直接视为已加载，避免显示加载态
       messagesLoaded: true,
     };
@@ -320,6 +365,57 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // 截断后内存里的末条必定已在 jsonl 中（partial 只存最末一条，已被删）
     const after = get().sessions.find(s => s.id === sessionId);
     if (after) markPersisted(sessionId, after.messages, false);
+  },
+
+  deleteMessage: async (sessionId, messageId) => {
+    const before = get().sessions.find(s => s.id === sessionId);
+    const target = before?.messages.find(m => m.id === messageId);
+    if (!before || !target) return false;
+
+    // 先把可能尚未落盘的最后一轮刷到 JSONL/partial，再执行精确删除。
+    await flushPendingSave(sessionId);
+
+    let result;
+    try {
+      result = await sessionStorage.deleteMessage(sessionId, messageId);
+    } catch (e) {
+      console.warn("[SessionStore] deleteMessage 失败:", e);
+      return false;
+    }
+    if (!result.deleted) return false;
+
+    persistedLastId.set(sessionId, result.lastPersistedId);
+    const now = new Date().toISOString();
+    set(state => {
+      const page = state.pagination[sessionId];
+      return {
+        sessions: state.sessions.map(s => {
+          if (s.id !== sessionId) return s;
+          // 会话摘要可能包含被删正文，清掉摘要层；提取/蒸馏水位线保持原值，
+          // 避免把全部历史重新提取并制造重复长期资产。
+          const memory = target.role === "user" || target.role === "assistant"
+            ? s.memory && { ...s.memory, summary: null, summarizedCount: 0, summaryChain: [] }
+            : s.memory;
+          return {
+            ...s,
+            messages: s.messages.filter(m => m.id !== messageId),
+            memory,
+            updatedAt: now,
+          };
+        }),
+        pagination: page
+          ? {
+              ...state.pagination,
+              [sessionId]: {
+                loadedOffset: Math.max(0, page.loadedOffset - 1),
+                total: result.total,
+              },
+            }
+          : state.pagination,
+      };
+    });
+    debouncedSaveMeta(sessionId);
+    return true;
   },
 
   updateMeta: (sessionId, metaUpdate) => {
@@ -390,6 +486,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   deleteSession: async (sessionId) => {
     await sessionStorage.deleteFromDisk(sessionId);
+    await channelBindings.removeByTargetSession(sessionId);
+    if (sessionId.startsWith("wecom-")) {
+      await channelBindings.unbind("wecom", sessionId);
+    }
     // 连同未发出的草稿与附件一起清理，否则会话没了记录还留在 localStorage
     chatDrafts.clear(sessionId);
     chatAttachments.clear(sessionId);

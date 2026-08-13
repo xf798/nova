@@ -22,6 +22,7 @@ export interface SessionMetaPayload {
   connectorId?: string;
   connectorSessionId?: string | null;
   modelId?: string;
+  workspace?: string | null;
   pinned?: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -34,6 +35,15 @@ export interface PageSizes {
   firstPage: number;
   /** 往上翻历史时每次条数：比首屏大，少翻几次 */
   loadMore: number;
+}
+
+/** 按 ID 删除消息后的磁盘状态 */
+export interface DeleteMessageResult {
+  deleted: boolean;
+  /** JSONL 中最后一条已定稿消息，供增量落盘重置锚点 */
+  lastPersistedId: string | null;
+  /** 删除后总消息数（JSONL + partial） */
+  total: number;
 }
 
 class SessionStorageManager {
@@ -121,6 +131,16 @@ class SessionStorageManager {
    */
   async dropTrailing(sessionId: string, count: number): Promise<void> {
     await invoke("drop_trailing_session_messages", { sessionId, count });
+  }
+
+  /**
+   * 按消息 ID 精确删除。
+   *
+   * 由 Rust 直接扫描完整 JSONL，不能用前端当前分页消息做 rewrite，
+   * 否则会把尚未加载到内存的历史一起截掉。
+   */
+  async deleteMessage(sessionId: string, messageId: string): Promise<DeleteMessageResult> {
+    return invoke("delete_session_message", { sessionId, messageId });
   }
 
   /** 写入正在流式生成的最后一条消息 */

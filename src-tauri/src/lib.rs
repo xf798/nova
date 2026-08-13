@@ -1061,6 +1061,7 @@ fn write_meta_and_index(session_id: &str, meta: &serde_json::Value) -> Result<()
         "connectorId": meta.get("connectorId").cloned().unwrap_or(serde_json::Value::Null),
         "connectorSessionId": meta.get("connectorSessionId").cloned().unwrap_or(serde_json::Value::Null),
         "modelId": meta.get("modelId").cloned().unwrap_or(serde_json::Value::Null),
+        "workspace": meta.get("workspace").cloned().unwrap_or(serde_json::Value::Null),
         "pinned": meta.get("pinned").cloned().unwrap_or(serde_json::json!(false)),
         "createdAt": meta.get("createdAt").cloned().unwrap_or(serde_json::Value::Null),
         "updatedAt": meta.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
@@ -1232,6 +1233,95 @@ fn drop_trailing_session_messages(session_id: String, count: usize) -> Result<()
         atomic_write(&jsonl, buf.as_bytes())?;
     }
     Ok(())
+}
+
+/// 从完整 JSONL / partial 中按稳定消息 ID 精确删除一条消息。
+///
+/// 返回删除后的最后一个 JSONL 消息 ID，前端据此重置增量追加锚点。
+/// 辅助函数接收路径，便于用临时目录做文件级回归测试。
+fn delete_session_message_from_paths(
+    jsonl: &std::path::Path,
+    partial: &std::path::Path,
+    message_id: &str,
+) -> Result<serde_json::Value, String> {
+    let mut deleted = false;
+
+    // partial 是逻辑上的最后一条，先检查它。
+    if partial.exists() {
+        let matches = std::fs::read_to_string(partial)
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|m| {
+                m.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|id| id == message_id)
+            })
+            .unwrap_or(false);
+        if matches {
+            std::fs::remove_file(partial).map_err(|e| e.to_string())?;
+            deleted = true;
+        }
+    }
+
+    if !deleted {
+        let raw = std::fs::read_to_string(jsonl).unwrap_or_default();
+        let mut buf = String::new();
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let matches = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|m| {
+                m.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|id| id == message_id)
+            })
+                .unwrap_or(false);
+            if matches {
+                deleted = true;
+                continue;
+            }
+            // 解析失败的行也原样保留，不能因删除另一条消息扩大损失范围。
+            buf.push_str(line);
+            buf.push('\n');
+        }
+        if deleted {
+            atomic_write(jsonl, buf.as_bytes())?;
+        }
+    }
+
+    let raw_after = std::fs::read_to_string(jsonl).unwrap_or_default();
+    let lines_after: Vec<&str> = raw_after
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let last_persisted_id = lines_after.iter().rev().find_map(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+    });
+    let total = lines_after.len() + usize::from(partial.exists());
+
+    Ok(serde_json::json!({
+        "deleted": deleted,
+        "lastPersistedId": last_persisted_id,
+        "total": total,
+    }))
+}
+
+/// 按消息 ID 删除，不依赖前端是否加载了完整会话。
+#[tauri::command]
+fn delete_session_message(
+    session_id: String,
+    message_id: String,
+) -> Result<serde_json::Value, String> {
+    if message_id.trim().is_empty() {
+        return Err("messageId 不能为空".to_string());
+    }
+    migrate_session_if_needed(&session_id)?;
+    delete_session_message_from_paths(
+        &session_jsonl_path(&session_id),
+        &session_partial_path(&session_id),
+        &message_id,
+    )
 }
 
 /// 会话搜索。
@@ -1920,6 +2010,7 @@ pub fn run() {
             append_session_messages,
             rewrite_session_messages,
             drop_trailing_session_messages,
+            delete_session_message,
             search_session_messages,
             embedding::embedding_status,
             embedding::download_embedding_model,
@@ -2411,6 +2502,66 @@ mod session_store_tests {
     #[test]
     fn guard_allows_first_write_of_new_session() {
         assert!(!guard_rejects(1, 0, false));
+    }
+
+    // ===== 按 ID 删除 =====
+
+    #[test]
+    fn delete_by_id_removes_only_target_jsonl_line() {
+        let d = tmpdir("delete-by-id");
+        let jsonl = d.join("s.messages.jsonl");
+        let partial = d.join("s.partial.json");
+        write_jsonl(&jsonl, 5);
+
+        let result = delete_session_message_from_paths(&jsonl, &partial, "msg-2").unwrap();
+        let ids: Vec<String> = fs::read_to_string(&jsonl)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(ids, vec!["msg-0", "msg-1", "msg-3", "msg-4"]);
+        assert_eq!(result["deleted"], true);
+        assert_eq!(result["lastPersistedId"], "msg-4");
+        assert_eq!(result["total"], 4);
+    }
+
+    #[test]
+    fn delete_by_id_can_remove_partial_without_touching_jsonl() {
+        let d = tmpdir("delete-partial");
+        let jsonl = d.join("s.messages.jsonl");
+        let partial = d.join("s.partial.json");
+        write_jsonl(&jsonl, 3);
+        fs::write(&partial, serde_json::to_string(&msg(9)).unwrap()).unwrap();
+
+        let before = fs::read_to_string(&jsonl).unwrap();
+        let result = delete_session_message_from_paths(&jsonl, &partial, "msg-9").unwrap();
+
+        assert!(!partial.exists());
+        assert_eq!(fs::read_to_string(&jsonl).unwrap(), before);
+        assert_eq!(result["deleted"], true);
+        assert_eq!(result["lastPersistedId"], "msg-2");
+        assert_eq!(result["total"], 3);
+    }
+
+    #[test]
+    fn delete_by_id_not_found_keeps_files_unchanged() {
+        let d = tmpdir("delete-missing");
+        let jsonl = d.join("s.messages.jsonl");
+        let partial = d.join("s.partial.json");
+        write_jsonl(&jsonl, 2);
+        let before = fs::read_to_string(&jsonl).unwrap();
+
+        let result = delete_session_message_from_paths(&jsonl, &partial, "missing").unwrap();
+
+        assert_eq!(fs::read_to_string(&jsonl).unwrap(), before);
+        assert_eq!(result["deleted"], false);
+        assert_eq!(result["total"], 2);
     }
 
     // ===== 追加语义 =====

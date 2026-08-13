@@ -15,11 +15,13 @@ import { trySummarize } from "../core/memory/summarize";
 import { tryExtractMemories } from "../core/memory/extractor";
 
 import { sendMessage } from "../core/sendMessage";
+import { sessionTurnQueue } from "../core/sessionTurnQueue";
 import { getActiveSkillList } from "../core/skills";
 import { useSessionStore } from "../core/sessionStore";
 import { scheduler } from "../core/scheduler";
 import ChatInput from "./chat/ChatInput";
 import MessageItem from "./chat/MessageItem";
+import WecomSessionBinding from "./chat/WecomSessionBinding";
 import { isNearBottom, shouldSmoothFollow } from "./chat/scrollFollow";
 
 // 队列项：AI 输出中排队待发的指令
@@ -81,6 +83,21 @@ function ChatView() {
   const MIN_LOADING_MS = 600;
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
+
+  // 工作目录属于会话上下文：切换时恢复，企微续接同一会话时也使用该目录。
+  useEffect(() => {
+    const workspace = useSessionStore.getState().sessions.find(s => s.id === activeSessionId)?.workspace;
+    setSelectedWorkspace(workspace || null);
+  }, [activeSessionId]);
+
+  const updateSelectedWorkspace: React.Dispatch<React.SetStateAction<string | null>> = (next) => {
+    setSelectedWorkspace(previous => {
+      const resolved = typeof next === "function" ? next(previous) : next;
+      const sessionId = useSessionStore.getState().activeSessionId;
+      if (sessionId) useSessionStore.getState().updateMeta(sessionId, { workspace: resolved || undefined });
+      return resolved;
+    });
+  };
 
   const isProcessing = activeSessionId ? processingSessions.has(activeSessionId) : false;
 
@@ -304,6 +321,7 @@ function ChatView() {
       // 点「新对话」后、发消息前选的模型：那时还没有 session 可写，
       // 暂存在 pendingModel 里，此刻作为初始值落地
       modelId: pendingModel.take(),
+      workspace: selectedWorkspace || undefined,
     });
     useSessionStore.getState().setActiveSessionId(sessionId);
     return sessionId;
@@ -420,6 +438,8 @@ function ChatView() {
     const sessionId = queued ? queued.targetSessionId : ensureSession();
     setProcessingSessions(prev => new Set(prev).add(sessionId));
     processingRef.current = new Set(processingRef.current).add(sessionId);
+    const releaseTurn = await sessionTurnQueue.acquire(sessionId);
+    try {
     sendTimeRef.current = Date.now();
 
     const loadingId = `msg-${Date.now()}-loading`;
@@ -698,6 +718,9 @@ function ChatView() {
 
     // 出队：处理完成后检查该会话队列，自动触发下一条
     flushQueue(sessionId);
+    } finally {
+      releaseTurn();
+    }
   };
 
   const flushQueue = (sessionId: string) => {
@@ -858,12 +881,35 @@ function ChatView() {
                     setQuotedMessage({ id: msg.id, role: msg.role, content: msg.content });
                   }
                 }}
+                onDelete={!isProcessing ? async () => {
+                  const sid = activeSessionId;
+                  if (!sid || !window.confirm("确定删除这条消息吗？此操作无法撤销。")) return;
+                  const deleted = await useSessionStore.getState().deleteMessage(sid, msg.id);
+                  if (!deleted) {
+                    window.dispatchEvent(new CustomEvent("nova-notify", {
+                      detail: { msg: "消息删除失败，请重试", type: "error" },
+                    }));
+                    return;
+                  }
+                  if (quotedMessage?.id === msg.id) setQuotedMessage(null);
+                  // 原生会话内部仍保留旧消息；销毁实例并清掉 session id，
+                  // 下次发送会以删除后的本地历史创建新上下文。
+                  await connectorInstances.dispose(sid);
+                  useSessionStore.getState().updateMeta(sid, { connectorSessionId: null });
+                  window.dispatchEvent(new CustomEvent("nova-notify", {
+                    detail: { msg: "消息已删除", type: "success" },
+                  }));
+                } : undefined}
               />
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {activeSessionId?.startsWith("wecom-") && (
+        <WecomSessionBinding channelSessionId={activeSessionId} sessions={sessions} />
+      )}
 
       {/* 上下文指示器：Skill + 引用消息 统一一行 */}
       {(activeSkills.length > 0 || quotedMessage) && (
@@ -968,7 +1014,7 @@ function ChatView() {
         attachments={attachments}
         setAttachments={setAttachments}
         selectedWorkspace={selectedWorkspace}
-        setSelectedWorkspace={setSelectedWorkspace}
+        setSelectedWorkspace={updateSelectedWorkspace}
         showWorkspacePicker={showWorkspacePicker}
         setShowWorkspacePicker={setShowWorkspacePicker}
         onSend={handleSend}

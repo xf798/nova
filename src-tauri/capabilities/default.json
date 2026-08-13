@@ -1,10 +1,16 @@
 {
   "identifier": "default",
   "description": "Pipeline Commander 默认权限",
-  "windows": ["main"],
+  "windows": ["main", "image-preview"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-title",
     "updater:default",
     "updater:allow-check",
     "updater:allow-download-and-install",

@@ -17,7 +17,31 @@ interface ToolCallInfo {
   completedAt?: number;
 }
 
-const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAttachment, isSessionProcessing = false, isLastMessage = false, onCopy, onRetry, onQuote }: {
+function DeleteButton({ onDelete }: { onDelete: () => void }) {
+  return (
+    <button
+      onClick={onDelete}
+      className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-app-surface-hover transition-colors"
+      title="删除"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6l-1 14H6L5 6m3 0V4h8v2M10 11v5M14 11v5"/>
+      </svg>
+    </button>
+  );
+}
+
+function OriginBadge({ message }: { message: Message }) {
+  if (message.origin?.channel !== "wecom") return null;
+  return (
+    <div className="mb-1 text-[10px] text-app-text-muted">
+      企微{message.origin.senderName ? ` · ${message.origin.senderName}` : ""}
+    </div>
+  );
+}
+
+const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAttachment, isSessionProcessing = false, isLastMessage = false, onCopy, onRetry, onQuote, onDelete }: {
   message: Message;
   onImageClick: (path: string) => void;
   onAddAttachment?: (path: string) => void;
@@ -26,6 +50,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
   onCopy?: () => void;
   onRetry?: () => void;
   onQuote?: () => void;
+  onDelete?: () => void;
 }) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -56,6 +81,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
   if (isLoading) {
     return (
       <div className="py-2">
+        <OriginBadge message={message} />
         {/* 召回在请求发出前就已确定，等待期间即可展示 */}
         {message.recall && <RecallBlock recall={message.recall} />}
         <div className="flex-shrink-0 flex items-center h-8">
@@ -67,8 +93,16 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
 
   if (isSystem) {
     return (
-      <div className="px-3 py-2 rounded-lg text-[12px] text-app-text-muted border border-app-border bg-app-surface whitespace-pre-wrap">
-        {message.content}
+      <div className="group">
+        <OriginBadge message={message} />
+        <div className="px-3 py-2 rounded-lg text-[12px] text-app-text-muted border border-app-border bg-app-surface whitespace-pre-wrap">
+          {message.content}
+        </div>
+        {onDelete && (
+          <div className="mt-1 flex justify-end opacity-0 group-hover:opacity-100 transition-opacity">
+            <DeleteButton onDelete={onDelete} />
+          </div>
+        )}
       </div>
     );
   }
@@ -77,6 +111,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
     return (
       <div className="flex items-start justify-end group">
         <div className="max-w-[85%]">
+          <div className="flex justify-end"><OriginBadge message={message} /></div>
           {message.quotedMessage && (
             <div className="flex justify-end mb-1">
               <div className="px-3 py-1.5 rounded-2xl text-[12px] text-app-text-muted border border-app-border max-w-full truncate"
@@ -120,18 +155,21 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
               style={{ backgroundColor: "var(--app-msg-user-bg)" }}
             />
           )}
-          {onQuote && message.content && (
+          {((onQuote && message.content) || onDelete) && (
             <div className="mt-1 flex items-center gap-2 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
-              <button
-                onClick={onQuote}
-                className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-app-surface-hover transition-colors"
-                title="引用"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="9 17 4 12 9 7"/>
-                  <path d="M20 18v-2a4 4 0 00-4-4H4"/>
-                </svg>
-              </button>
+              {onQuote && message.content && (
+                <button
+                  onClick={onQuote}
+                  className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-app-surface-hover transition-colors"
+                  title="引用"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-app-text-muted" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="9 17 4 12 9 7"/>
+                    <path d="M20 18v-2a4 4 0 00-4-4H4"/>
+                  </svg>
+                </button>
+              )}
+              {onDelete && <DeleteButton onDelete={onDelete} />}
             </div>
           )}
         </div>
@@ -142,6 +180,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
   return (
     <div className="flex items-start group">
       <div className="flex-1 min-w-0">
+        <OriginBadge message={message} />
 
         {/* 召回明细：请求发出前注入了哪些记忆/技能，位于过程之前 */}
         {message.recall && <RecallBlock recall={message.recall} />}
@@ -181,7 +220,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
           </div>
         )}
 
-        {!isStreaming && displayContent && (
+        {!isStreaming && (displayContent || onDelete) && (
           <div className="mt-1.5 flex items-center gap-2 text-[10px] text-app-text-muted opacity-0 group-hover:opacity-100 transition-opacity">
             {onCopy && (
               <button
@@ -224,6 +263,7 @@ const MessageItem = memo(function MessageItem({ message, onImageClick, onAddAtta
                 </svg>
               </button>
             )}
+            {onDelete && <DeleteButton onDelete={onDelete} />}
             <span className="opacity-60">{formatMsgTime(message.timestamp)}</span>
           </div>
         )}
