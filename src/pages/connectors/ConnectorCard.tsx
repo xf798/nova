@@ -1,8 +1,9 @@
 import type { ConnectorConfig } from "../../connectors";
 
-function ConnectorCard({ config, status, onCheck, onEdit, isEditing, isDefault, onSetDefault, children }: {
+function ConnectorCard({ config, status, cliCommandStatus, onCheck, onEdit, isEditing, isDefault, onSetDefault, children }: {
   config: ConnectorConfig;
   status: boolean | null | undefined;
+  cliCommandStatus?: { resolution?: { command: string; source: string }; error?: string };
   onCheck: () => void;
   onEdit: () => void;
   isEditing?: boolean;
@@ -53,16 +54,24 @@ function ConnectorCard({ config, status, onCheck, onEdit, isEditing, isDefault, 
               )}
             </div>
             <p className="text-[12px] text-app-text-muted mt-0.5">
-              {config.description || (config.type === "api" ? config.apiEndpoint : config.type === "bot" ? `${platformLabel}机器人` : config.command)}
+              {config.description || (config.type === "api" ? config.apiEndpoint : config.type === "bot" ? `${platformLabel}机器人` : "Kiro CLI 本地连接器")}
             </p>
             <p className="text-[11px] text-app-text-muted mt-0.5 font-mono">
               {config.type === "api"
                 ? `${config.apiEndpoint} · ${config.model || "default"}`
                 : config.type === "bot"
                 ? `${config.botId ? config.botId.slice(0, 12) + "..." : "未配置"}`
-                : `${config.command} ${(config.defaultArgs || []).slice(0, 3).join(" ")}${(config.defaultArgs || []).length > 3 ? "..." : ""}`
+                : `${config.command || "自动探测 kiro-cli"} ${(config.defaultArgs || []).slice(0, 3).join(" ")}${(config.defaultArgs || []).length > 3 ? "..." : ""}`
               }
             </p>
+            {config.type === "cli" && cliCommandStatus?.resolution && (
+              <p className="text-[10px] text-[#10a37f] mt-0.5 font-mono break-all">
+                {cliCommandStatus.resolution.source === "configured" ? "指定" : "已自动检测"}: {cliCommandStatus.resolution.command}
+              </p>
+            )}
+            {config.type === "cli" && cliCommandStatus?.error && (
+              <p className="text-[10px] text-red-500 mt-0.5 break-all">{cliCommandStatus.error}</p>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">

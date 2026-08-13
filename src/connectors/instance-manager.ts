@@ -16,6 +16,7 @@ import { KiroCliConnector } from "./builtin/kiro-cli";
 import { OpenAIConnector } from "./builtin/openai-api";
 import type { Connector, ConnectorConfig } from "./base";
 import { logger } from "../core/logger";
+import { getDefaultCliConnectorConfig } from "./cli-storage";
 
 // ─── 常量 ───
 
@@ -183,8 +184,9 @@ class ConnectorInstanceManager {
   ): Connector {
     if (baseConnector.config.type === "cli") {
       const cli = new KiroCliConnector({
-        id: `kiro-cli-session-${sessionId.slice(0, 8)}`,
+        ...baseConnector.config,
         ...config,
+        id: `kiro-cli-session-${sessionId.slice(0, 8)}`,
       });
 
       // 注册 Nova MCP Server（如果已启动）
@@ -269,7 +271,22 @@ class ConnectorInstanceManager {
   createTemporary(label?: string): KiroCliConnector {
     const id = `kiro-cli-temp-${label || Date.now()}`;
     logger.connector(`创建临时实例: ${id}`);
-    return new KiroCliConnector({ id });
+    return new KiroCliConnector({ ...getDefaultCliConnectorConfig(), id });
+  }
+
+  /** 销毁指定基础连接器派生出的所有会话实例。 */
+  async disposeByConnectorId(connectorId: string): Promise<void> {
+    const tasks: Promise<void>[] = [];
+    for (const [key, meta] of this.pool) {
+      if (meta.connectorId !== connectorId) continue;
+      this.pool.delete(key);
+      if (meta.connector.dispose) {
+        tasks.push(meta.connector.dispose().catch((err: any) =>
+          logger.error("CONNECTOR", `dispose 失败: ${err.message}`),
+        ));
+      }
+    }
+    await Promise.all(tasks);
   }
 
   /**

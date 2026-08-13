@@ -5,6 +5,7 @@ import { KiroCliConnector } from "./builtin/kiro-cli";
 import { WeComBotConnector } from "./builtin/wecom-bot";
 import { connectorInstances } from "./instance-manager";
 import { loadPersistedApiConnectors } from "./api-storage";
+import { loadCliConnectorConfigs } from "./cli-storage";
 
 class ConnectorRegistry {
   private connectors: Map<string, Connector> = new Map();
@@ -57,7 +58,13 @@ export const connectorRegistry = new ConnectorRegistry();
 // 注册内置连接器
 export async function initBuiltinConnectors(): Promise<void> {
   console.log(`[Nova:Registry] initBuiltinConnectors: 开始`);
-  connectorRegistry.register(new KiroCliConnector());
+  const cliConfigs = await loadCliConnectorConfigs();
+  const builtinConfig = cliConfigs.find(config => config.id === "kiro-cli");
+  connectorRegistry.register(new KiroCliConnector(builtinConfig));
+  for (const config of cliConfigs) {
+    if (config.id === "kiro-cli") continue;
+    connectorRegistry.register(new KiroCliConnector(config));
+  }
 
   // 注册企微机器人连接器（从持久化配置加载）
   const wecomBot = new WeComBotConnector();

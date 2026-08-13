@@ -28,7 +28,6 @@
     {
       "identifier": "shell:allow-spawn",
       "allow": [
-        { "name": "kiro-cli", "cmd": "/Users/wangxf/.local/bin/kiro-cli", "args": true },
         { "name": "node", "cmd": "node", "args": true },
         { "name": "sh", "cmd": "sh", "args": true }
       ]
@@ -36,7 +35,6 @@
     {
       "identifier": "shell:allow-execute",
       "allow": [
-        { "name": "kiro-cli", "cmd": "/Users/wangxf/.local/bin/kiro-cli", "args": true },
         { "name": "node", "cmd": "node", "args": true },
         { "name": "sh", "cmd": "sh", "args": true }
       ]

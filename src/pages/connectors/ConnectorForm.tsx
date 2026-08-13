@@ -129,8 +129,8 @@ export function CliForm({ data, onChange, onSubmit, onCancel, isEdit }: {
   isEdit?: boolean;
 }) {
   const disabled = isEdit
-    ? !data.name || !data.command
-    : !data.id || !data.name || !data.command;
+    ? !data.name
+    : !data.id || !data.name;
 
   return (
     <div className="space-y-3">
@@ -147,15 +147,17 @@ export function CliForm({ data, onChange, onSubmit, onCancel, isEdit }: {
         </div>
         {isEdit && (
           <div>
-            <label className={labelCls}>命令</label>
-            <input value={data.command} onChange={(e) => onChange({ ...data, command: e.target.value })} className={inputCls} />
+            <label className={labelCls}>命令（留空自动检测）</label>
+            <input value={data.command} onChange={(e) => onChange({ ...data, command: e.target.value })} placeholder="/Users/me/.local/bin/kiro-cli" className={inputCls} />
+            <p className="text-[10px] text-app-text-muted mt-1">可填写命令名或可执行文件绝对路径</p>
           </div>
         )}
       </div>
       {!isEdit && (
         <div>
-          <label className={labelCls}>命令</label>
-          <input value={data.command} onChange={(e) => onChange({ ...data, command: e.target.value })} placeholder="kiro-cli" className={inputCls} />
+          <label className={labelCls}>命令（留空自动检测）</label>
+          <input value={data.command} onChange={(e) => onChange({ ...data, command: e.target.value })} placeholder="自动检测 kiro-cli" className={inputCls} />
+          <p className="text-[10px] text-app-text-muted mt-1">可填写命令名或可执行文件绝对路径</p>
         </div>
       )}
       <div>
@@ -164,8 +166,8 @@ export function CliForm({ data, onChange, onSubmit, onCancel, isEdit }: {
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className={labelCls}>工作目录</label>
-          <input value={data.cwd} onChange={(e) => onChange({ ...data, cwd: e.target.value })} placeholder="/Users/wangxf/workspace" className={inputCls} />
+          <label className={labelCls}>工作目录（可选）</label>
+          <input value={data.cwd} onChange={(e) => onChange({ ...data, cwd: e.target.value })} placeholder="留空使用会话目录或用户主目录" className={inputCls} />
         </div>
         <div>
           <label className={labelCls}>描述（可选）</label>

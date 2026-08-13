@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { connectorRegistry, persistApiConnectors } from "../connectors";
+import { connectorRegistry, persistApiConnectors, connectorInstances } from "../connectors";
+import { persistCliConnectorConfigs } from "../connectors/cli-storage";
+import type { KiroCliCommandResolution } from "../connectors/kiro-cli-command";
 import { KiroCliConnector, OpenAIConnector, WeComBotConnector } from "../connectors";
 import { loadPersistedApiConnectors } from "../connectors/api-storage";
 import type { ConnectorConfig, ConnectorType } from "../connectors";
@@ -17,7 +19,14 @@ type AddMode = "api" | "cli" | "bot";
 // ─── 默认表单值 ───
 
 const defaultApiForm: ApiFormData = { id: "", name: "", endpoint: "https://api.openai.com/v1", apiKey: "", model: "gpt-4o", description: "" };
-const defaultCliForm: CliFormData = { id: "", name: "", command: "", args: "", cwd: "/Users/wangxf/workspace", description: "" };
+const defaultCliForm: CliFormData = {
+  id: "",
+  name: "",
+  command: "",
+  args: "acp --agent-engine v2 --trust-all-tools",
+  cwd: "",
+  description: "",
+};
 const defaultBotForm: BotFormData = { name: "", platform: "wecom", botId: "", secret: "", autoConnect: true, policy: { ...DEFAULT_WECOM_POLICY } };
 
 function ConnectorsPage() {
@@ -49,6 +58,28 @@ function ConnectorsPage() {
   }, []);
 
   const [healthStatus, setHealthStatus] = useState<Record<string, boolean | null>>({});
+  const [cliCommandStatus, setCliCommandStatus] = useState<Record<string, { resolution?: KiroCliCommandResolution; error?: string }>>({});
+  const cliConfigSignature = connectors
+    .filter(connector => connector.config.type === "cli")
+    .map(connector => `${connector.config.id}:${connector.config.command || ""}`)
+    .join("|");
+
+  useEffect(() => {
+    for (const connector of connectors) {
+      if (!(connector instanceof KiroCliConnector)) continue;
+      connector.resolveCommand().then(resolution => {
+        setCliCommandStatus(previous => ({ ...previous, [connector.config.id]: { resolution } }));
+      }).catch(error => {
+        setCliCommandStatus(previous => ({
+          ...previous,
+          [connector.config.id]: { error: error?.message || String(error) },
+        }));
+      });
+    }
+    // connectors 来自 registry，签名用于在新增或修改命令后重新探测。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cliConfigSignature]);
+
   const [showAddForm, setShowAddForm] = useState(false);
   const [addMode, setAddMode] = useState<AddMode>("api");
 
@@ -78,6 +109,16 @@ function ConnectorsPage() {
     const connector = connectorRegistry.get(id);
     if (!connector) return;
     setHealthStatus(prev => ({ ...prev, [id]: null }));
+    if (connector instanceof KiroCliConnector) {
+      try {
+        const resolution = await connector.resolveCommand(true);
+        setCliCommandStatus(previous => ({ ...previous, [id]: { resolution } }));
+      } catch (error: any) {
+        setCliCommandStatus(previous => ({ ...previous, [id]: { error: error?.message || String(error) } }));
+        setHealthStatus(prev => ({ ...prev, [id]: false }));
+        return;
+      }
+    }
     const ok = await connector.healthCheck();
     setHealthStatus(prev => ({ ...prev, [id]: ok }));
   };
@@ -94,14 +135,20 @@ function ConnectorsPage() {
     setTick(t => t + 1);
   };
 
-  const handleAddCli = () => {
-    if (!cliForm.id || !cliForm.name || !cliForm.command) return;
+  const handleAddCli = async () => {
+    if (!cliForm.id || !cliForm.name) return;
     const config: Partial<ConnectorConfig> = {
-      id: cliForm.id, name: cliForm.name, type: "cli" as ConnectorType,
-      command: cliForm.command, defaultArgs: cliForm.args.split(/\s+/).filter(Boolean),
-      cwd: cliForm.cwd || undefined, description: cliForm.description || undefined, enabled: true,
+      id: cliForm.id,
+      name: cliForm.name,
+      type: "cli" as ConnectorType,
+      command: cliForm.command.trim(),
+      defaultArgs: cliForm.args.split(/\s+/).filter(Boolean),
+      cwd: cliForm.cwd.trim() || undefined,
+      description: cliForm.description || undefined,
+      enabled: true,
     };
     connectorRegistry.register(new KiroCliConnector(config));
+    await persistCliConnectorConfigs(connectorRegistry.getConfigs());
     setShowAddForm(false);
     setCliForm(defaultCliForm);
     setTick(t => t + 1);
@@ -166,22 +213,35 @@ function ConnectorsPage() {
   };
 
   const handleSaveEditCli = async () => {
-    if (!editCliForm.name || !editCliForm.command) return;
+    if (!editCliForm.name) return;
     const connector = connectorRegistry.get(editCliForm.id);
     if (connector) {
       const cfg = connector.config;
+      const newCommand = editCliForm.command.trim();
+      const newCwd = editCliForm.cwd.trim() || undefined;
       const newArgs = editCliForm.args.split(/\s+/).filter(Boolean);
-      const needReset = cfg.command !== editCliForm.command
-        || cfg.cwd !== (editCliForm.cwd || undefined)
+      const needReset = (cfg.command || "") !== newCommand
+        || cfg.cwd !== newCwd
         || JSON.stringify(cfg.defaultArgs || []) !== JSON.stringify(newArgs);
       cfg.name = editCliForm.name;
-      cfg.command = editCliForm.command;
+      cfg.command = newCommand;
       cfg.defaultArgs = newArgs;
-      cfg.cwd = editCliForm.cwd || undefined;
+      cfg.cwd = newCwd;
       cfg.description = editCliForm.description || undefined;
-      if (needReset && 'resetProcess' in connector) {
-        try { await (connector as any).resetProcess(); } catch (e: any) { console.error("[CLI] 重置进程失败:", e); }
+      if (needReset && connector instanceof KiroCliConnector) {
+        try {
+          await connector.resetProcess();
+          await connectorInstances.disposeByConnectorId(cfg.id);
+          const resolution = await connector.resolveCommand(true);
+          setCliCommandStatus(previous => ({ ...previous, [cfg.id]: { resolution } }));
+        } catch (error: any) {
+          setCliCommandStatus(previous => ({
+            ...previous,
+            [cfg.id]: { error: error?.message || String(error) },
+          }));
+        }
       }
+      await persistCliConnectorConfigs(connectorRegistry.getConfigs());
     }
     setEditingId(null);
     setTick(t => t + 1);
@@ -241,6 +301,7 @@ function ConnectorsPage() {
             key={c.config.id}
             config={c.config}
             status={healthStatus[c.config.id]}
+            cliCommandStatus={c.config.type === "cli" ? cliCommandStatus[c.config.id] : undefined}
             onCheck={() => checkHealth(c.config.id)}
             onEdit={() => editingId === c.config.id ? cancelEdit() : startEdit(c.config.id)}
             isEditing={editingId === c.config.id}

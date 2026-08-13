@@ -2,13 +2,15 @@
 // 使用 Agent Client Protocol (JSON-RPC over stdio) 与 kiro-cli 通信
 // 参考: https://kiro.dev/docs/cli/acp/
 
-import { Command } from "@tauri-apps/plugin-shell";
+import { Command, type SpawnOptions } from "@tauri-apps/plugin-shell";
+import { homeDir } from "@tauri-apps/api/path";
 import type { Connector, ConnectorConfig, ConnectorCapabilities, SendOptions, SendResult, ModelInfo, HistoryMessage, TokenUsage, StreamMeta } from "../base";
+import { buildKiroCliExecArgs, resolveKiroCliCommand, type KiroCliCommandResolution } from "../kiro-cli-command";
 import { TimelineBuilder } from "../timeline";
 import { logger } from "../../core/logger";
 
 // ─── 本地文件日志（追加写入 ~/.nova/logs/acp-session.log）───
-const ACP_LOG_FILE = "/Users/wangxf/.nova/logs/acp-session.log";
+const ACP_LOG_RELATIVE_PATH = ".nova/logs/acp-session.log";
 
 // ─── 多实例模式 ───
 // 每个 KiroCliConnector 实例拥有独立的 ACP 进程和 session，
@@ -18,10 +20,13 @@ async function fileLog(message: string): Promise<void> {
   const timestamp = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   const line = `[${timestamp}] ${message}`;
   try {
-    const escaped = line.replace(/'/g, "'\\''");
+    const logPath = `${(await homeDir()).replace(/\/$/, "")}/${ACP_LOG_RELATIVE_PATH}`;
     const cmd = Command.create("sh", [
       "-c",
-      `mkdir -p "$(dirname '${ACP_LOG_FILE}')" && printf '%s\\n' '${escaped}' >> '${ACP_LOG_FILE}'`,
+      'mkdir -p "$(dirname "$1")" && printf "%s\\n" "$2" >> "$1"',
+      "--",
+      logPath,
+      line,
     ]);
     await cmd.execute();
   } catch {
@@ -326,6 +331,8 @@ export class KiroCliConnector implements Connector {
   private terminals: Map<string, TerminalInstance> = new Map();
   /** 注册的 MCP Server 配置（创建 session 时传递给 agent） */
   private mcpServers: McpServerConfig[] = [];
+  /** 已解析到的 kiro-cli 真实路径；配置变更时由 resetProcess 清除 */
+  private commandResolution: KiroCliCommandResolution | null = null;
 
   /** 标记当前是否正在执行闲置 kill（用于区分 close 事件是正常退出还是崩溃） */
   private isIdleKilling: boolean = false;
@@ -368,17 +375,19 @@ export class KiroCliConnector implements Connector {
   }
 
   constructor(config?: Partial<ConnectorConfig>) {
+    const defaultArgs = ["acp", "--agent-engine", "v2", "--trust-all-tools"];
     this.config = {
       id: config?.id || "kiro-cli",
       name: config?.name || "Kiro CLI",
       type: "cli",
       icon: config?.icon || "",
-      command: "kiro-cli",
-      defaultArgs: ["acp", "--agent-engine", "v2", "--trust-all-tools"],
-      cwd: config?.cwd || "/Users/wangxf/workspace",
-      description: "Kiro AI 助手",
-      enabled: true,
+      description: config?.description || "Kiro AI 助手",
+      enabled: config?.enabled ?? true,
       ...config,
+      // 空字符串表示自动探测；非空值是用户显式覆盖。
+      command: config?.command?.trim() || "",
+      defaultArgs: config?.defaultArgs?.length ? [...config.defaultArgs] : defaultArgs,
+      cwd: config?.cwd?.trim() || undefined,
     };
   }
 
@@ -418,12 +427,35 @@ export class KiroCliConnector implements Connector {
 
   // ─── MCP 注入到 ~/.kiro/settings/mcp.json ───
 
-  private static readonly KIRO_MCP_CONFIG = "/Users/wangxf/.kiro/settings/mcp.json";
+  private async kiroMcpConfigPath(): Promise<string> {
+    return `${(await homeDir()).replace(/\/$/, "")}/.kiro/settings/mcp.json`;
+  }
+
+  private async readKiroMcpConfig(configPath: string): Promise<any> {
+    const readCmd = Command.create("sh", ["-c", 'cat "$1" 2>/dev/null || echo "{}"', "--", configPath]);
+    const readResult = await readCmd.execute();
+    try {
+      return JSON.parse(readResult.stdout.trim() || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  private async writeKiroMcpConfig(configPath: string, config: any): Promise<void> {
+    const writeCmd = Command.create("sh", [
+      "-c",
+      'mkdir -p "$(dirname "$1")" && printf "%s" "$2" > "$1"',
+      "--",
+      configPath,
+      JSON.stringify(config, null, 2),
+    ]);
+    await writeCmd.execute();
+  }
 
   /**
    * 将当前注册的 HTTP MCP servers 写入 kiro-cli 全局配置。
    * kiro-cli 启动时会自动加载此配置文件中的 MCP servers。
-   * 
+   *
    * 策略：读取现有 mcp.json → 注入/更新 nova-tools 条目 → 写回。
    */
   private async injectMcpToKiroConfig(): Promise<void> {
@@ -431,25 +463,14 @@ export class KiroCliConnector implements Connector {
     if (httpServers.length === 0) return;
 
     try {
-      const configPath = KiroCliConnector.KIRO_MCP_CONFIG;
-      
-      // 读取现有配置
-      const readCmd = Command.create("sh", ["-c", `cat "${configPath}" 2>/dev/null || echo '{}'`]);
-      const readResult = await readCmd.execute();
-      let config: any;
-      try {
-        config = JSON.parse(readResult.stdout.trim() || "{}");
-      } catch {
-        config = {};
-      }
+      const configPath = await this.kiroMcpConfigPath();
+      const config = await this.readKiroMcpConfig(configPath);
       if (!config.mcpServers) config.mcpServers = {};
 
-      // 注入每个 HTTP MCP server
       let changed = false;
       for (const server of httpServers) {
         const existing = config.mcpServers[server.name];
         const newEntry: any = { url: server.url };
-        // 如果已存在且 url 相同则跳过
         if (existing && existing.url === server.url && !existing.disabled) continue;
         config.mcpServers[server.name] = newEntry;
         changed = true;
@@ -460,11 +481,7 @@ export class KiroCliConnector implements Connector {
         return;
       }
 
-      // 写回配置
-      const json = JSON.stringify(config, null, 2);
-      const escaped = json.replace(/'/g, "'\\''");
-      const writeCmd = Command.create("sh", ["-c", `printf '%s' '${escaped}' > "${configPath}"`]);
-      await writeCmd.execute();
+      await this.writeKiroMcpConfig(configPath, config);
       fileLog(`[MCP] ✅ 已注入 ${httpServers.length} 个 MCP server 到 ${configPath}`);
     } catch (err: any) {
       fileLog(`[MCP] ⚠️ 注入 mcp.json 失败: ${err.message}`);
@@ -472,23 +489,13 @@ export class KiroCliConnector implements Connector {
     }
   }
 
-  /**
-   * 从 kiro-cli 全局配置中移除 Nova MCP servers（dispose 时调用）。
-   */
+  /** 从 kiro-cli 全局配置中移除 Nova MCP servers（dispose 时调用）。 */
   private async removeMcpFromKiroConfig(): Promise<void> {
     try {
-      const configPath = KiroCliConnector.KIRO_MCP_CONFIG;
-      const readCmd = Command.create("sh", ["-c", `cat "${configPath}" 2>/dev/null || echo '{}'`]);
-      const readResult = await readCmd.execute();
-      let config: any;
-      try {
-        config = JSON.parse(readResult.stdout.trim() || "{}");
-      } catch {
-        return;
-      }
+      const configPath = await this.kiroMcpConfigPath();
+      const config = await this.readKiroMcpConfig(configPath);
       if (!config.mcpServers) return;
 
-      // 移除 Nova 注入的 servers
       let changed = false;
       for (const server of this.mcpServers) {
         if (server.name in config.mcpServers) {
@@ -496,30 +503,54 @@ export class KiroCliConnector implements Connector {
           changed = true;
         }
       }
-
       if (!changed) return;
 
-      const json = JSON.stringify(config, null, 2);
-      const escaped = json.replace(/'/g, "'\\''");
-      const writeCmd = Command.create("sh", ["-c", `printf '%s' '${escaped}' > "${configPath}"`]);
-      await writeCmd.execute();
+      await this.writeKiroMcpConfig(configPath, config);
       fileLog(`[MCP] 🧹 已从 ${configPath} 移除 Nova MCP servers`);
     } catch (err: any) {
       fileLog(`[MCP] ⚠️ 移除 mcp.json 条目失败: ${err.message}`);
     }
   }
 
+  /** 获取当前配置实际解析到的命令路径，供设置页展示。 */
+  async resolveCommand(force = false): Promise<KiroCliCommandResolution> {
+    if (this.commandResolution && !force) return this.commandResolution;
+
+    const resolution = await resolveKiroCliCommand(this.config.command, {
+      homeDir,
+      findOnPath: async (commandName) => {
+        const result = await Command.create("sh", [
+          "-c",
+          'command -v "$1" 2>/dev/null || true',
+          "--",
+          commandName,
+        ], { encoding: "utf-8" }).execute();
+        return result.stdout.trim() || null;
+      },
+      isExecutable: async (path) => {
+        const result = await Command.create("sh", ["-c", 'test -x "$1"', "--", path]).execute();
+        return result.code === 0;
+      },
+    });
+    this.commandResolution = resolution;
+    return resolution;
+  }
+
+  get resolvedCommand(): KiroCliCommandResolution | null {
+    return this.commandResolution;
+  }
+
+  /** 通过固定获权的 sh 安全 exec 真实命令；路径和参数不拼接进 shell 字符串。 */
+  private async createKiroCommand(args: string[], options?: SpawnOptions) {
+    const resolution = await this.resolveCommand();
+    return Command.create("sh", buildKiroCliExecArgs(resolution.command, args), options);
+  }
+
   async healthCheck(): Promise<boolean> {
     try {
-      const command = Command.create("kiro-cli", ["--version"], { encoding: "utf-8" });
-      let output = "";
-      command.stdout.on("data", (d) => { output += d; });
-      await command.spawn();
-      await new Promise<void>((resolve) => {
-        command.on("close", () => resolve());
-        setTimeout(() => resolve(), 3000);
-      });
-      return output.trim().length > 0;
+      const command = await this.createKiroCommand(["--version"], { encoding: "utf-8" });
+      const result = await command.execute();
+      return result.code === 0 && `${result.stdout}${result.stderr}`.trim().length > 0;
     } catch {
       return false;
     }
@@ -572,10 +603,14 @@ export class KiroCliConnector implements Connector {
     // 清理旧进程
     await this.killAcpProcess();
 
-    const command = Command.create("kiro-cli", this.config.defaultArgs || ["acp", "--agent-engine", "v2"], {
-      cwd: this.config.cwd,
-      encoding: "utf-8",
-    });
+    const processCwd = this.config.cwd || await homeDir();
+    const command = await this.createKiroCommand(
+      this.config.defaultArgs || ["acp", "--agent-engine", "v2", "--trust-all-tools"],
+      {
+        cwd: processCwd,
+        encoding: "utf-8",
+      },
+    );
 
     this.buffer = "";
 
@@ -935,7 +970,7 @@ export class KiroCliConnector implements Connector {
     const command: string = params.command;
     const args: string[] = params.args || [];
     const env: { name: string; value: string }[] = params.env || [];
-    const cwd: string = params.cwd || this.config.cwd || "/Users/wangxf/workspace";
+    const cwd: string = params.cwd || this.config.cwd || await homeDir();
     const outputByteLimit: number = params.outputByteLimit || 1024 * 1024; // 默认 1MB
 
     if (!command) {
@@ -1135,7 +1170,7 @@ export class KiroCliConnector implements Connector {
 
     if (this.sessionId) return this.sessionId;
 
-    const workingDir = cwd || this.config.cwd;
+    const workingDir = cwd || this.config.cwd || await homeDir();
 
     // ── 策略 1: session/resume ──
     // 进程存活 + agent 支持 resume 时尝试直接恢复（无需重放消息）
@@ -1302,7 +1337,7 @@ export class KiroCliConnector implements Connector {
           await this.ensureAcpProcess();
           // 直接 session/new，不走 ensureSession（避免再次触发 session/load）
           const retryResp = await this.sendRequest("session/new", {
-            cwd: options.cwd || this.config.cwd,
+            cwd: options.cwd || this.config.cwd || await homeDir(),
             mcpServers: mcpServersForAcp(this.mcpServers),
           });
           if (retryResp.result?.sessionId) {
@@ -1932,6 +1967,7 @@ export class KiroCliConnector implements Connector {
   /** 重置 ACP 进程 — 配置变更后调用，kill 旧进程，下次 send 时会用新配置重新启动 */
   async resetProcess(): Promise<void> {
     console.log(`[ACP] 🔄 resetProcess: 配置已变更，重置进程 | connector: ${this.config.id}`);
+    this.commandResolution = null;
     await this.killAcpProcess();
   }
 
@@ -1988,15 +2024,12 @@ export class KiroCliConnector implements Connector {
 
   async listModels(): Promise<{ models: ModelInfo[]; defaultModel: string }> {
     try {
-      const command = Command.create("kiro-cli", ["chat", "--list-models", "--format", "json"], {
-        cwd: this.config.cwd,
-        encoding: "utf-8",
-      });
-      let output = "";
-      command.stdout.on("data", (d) => { output += d; });
-      await command.spawn();
-      await new Promise<void>((resolve) => { command.on("close", () => resolve()); });
-      const data = JSON.parse(output);
+      const command = await this.createKiroCommand(
+        ["chat", "--list-models", "--format", "json"],
+        { cwd: this.config.cwd || await homeDir(), encoding: "utf-8" },
+      );
+      const output = await command.execute();
+      const data = JSON.parse(output.stdout);
       return {
         models: data.models || [],
         defaultModel: data.default_model || "auto",
@@ -2008,15 +2041,12 @@ export class KiroCliConnector implements Connector {
 
   async listSessions(): Promise<{ id: string; label: string }[]> {
     try {
-      const command = Command.create("kiro-cli", ["chat", "--list-sessions", "--format", "json"], {
-        cwd: this.config.cwd,
-        encoding: "utf-8",
-      });
-      let output = "";
-      command.stdout.on("data", (d) => { output += d; });
-      await command.spawn();
-      await new Promise<void>((resolve) => { command.on("close", () => resolve()); });
-      const data = JSON.parse(output);
+      const command = await this.createKiroCommand(
+        ["chat", "--list-sessions", "--format", "json"],
+        { cwd: this.config.cwd || await homeDir(), encoding: "utf-8" },
+      );
+      const output = await command.execute();
+      const data = JSON.parse(output.stdout);
       const sessions: { id: string; label: string }[] = [];
       for (const ws of data) {
         for (const s of ws.sessions || []) {
