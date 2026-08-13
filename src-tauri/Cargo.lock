@@ -3202,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "nova"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "axum",
  "dirs",
