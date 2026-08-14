@@ -20,6 +20,13 @@ describe("resolveKiroCliCommand", () => {
     expect(p.findOnPath).not.toHaveBeenCalled();
   });
 
+  it("显式路径不可用时提示核对与授权方式", async () => {
+    await expect(resolveKiroCliCommand("/bad/path/kiro-cli", probe()))
+      .rejects.toThrow("chmod +x /bad/path/kiro-cli");
+    await expect(resolveKiroCliCommand("kiro-clissss", probe()))
+      .rejects.toThrow("command -v kiro-clissss");
+  });
+
   it("显式命令名从 PATH 解析为真实路径", async () => {
     const p = probe({ findOnPath: vi.fn().mockResolvedValue("/toolchain/bin/kiro-cli") });
     await expect(resolveKiroCliCommand("kiro-cli", p)).resolves.toEqual({
@@ -45,8 +52,9 @@ describe("resolveKiroCliCommand", () => {
     });
   });
 
-  it("探测失败时提示用户显式填写路径", async () => {
-    await expect(resolveKiroCliCommand(undefined, probe())).rejects.toThrow("请在连接器设置中填写可执行文件路径");
+  it("探测失败时给出排查步骤和候选路径", async () => {
+    await expect(resolveKiroCliCommand(undefined, probe())).rejects.toThrow("command -v kiro-cli");
+    await expect(resolveKiroCliCommand(undefined, probe())).rejects.toThrow("已检查过的路径");
   });
 
   it("常见目录不含开发者固定用户名", () => {

@@ -70,7 +70,7 @@ function ConnectorCard({ config, status, cliCommandStatus, onCheck, onEdit, isEd
               </p>
             )}
             {config.type === "cli" && cliCommandStatus?.error && (
-              <p className="text-[10px] text-red-500 mt-0.5 break-all">{cliCommandStatus.error}</p>
+              <p className="text-[10px] text-red-500 mt-1 break-all whitespace-pre-line leading-relaxed">{cliCommandStatus.error}</p>
             )}
           </div>
         </div>

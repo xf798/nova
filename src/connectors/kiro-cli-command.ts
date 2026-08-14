@@ -40,12 +40,25 @@ export async function resolveKiroCliCommand(
       if (await probe.isExecutable(configured)) {
         return { command: configured, source: "configured" };
       }
-      throw new Error(`指定的 Kiro CLI 不可执行或不存在: ${configured}`);
+      throw new Error(
+        [
+          `指定的 Kiro CLI 不可执行或不存在：${configured}`,
+          "排查：终端执行 ls -l " + configured + " 确认文件存在",
+          "若存在但不可执行，执行 chmod +x " + configured,
+          "或清空「命令」交给自动检测",
+        ].join("\n"),
+      );
     }
 
     const resolved = await probe.findOnPath(configured);
     if (resolved) return { command: resolved, source: "configured" };
-    throw new Error(`PATH 中找不到指定命令: ${configured}`);
+    throw new Error(
+      [
+        `PATH 中找不到命令：${configured}`,
+        "排查：终端执行 command -v " + configured + " 确认是否可用",
+        "建议改填可执行文件的绝对路径，或清空「命令」交给自动检测",
+      ].join("\n"),
+    );
   }
 
   const fromPath = await probe.findOnPath("kiro-cli");
@@ -58,5 +71,14 @@ export async function resolveKiroCliCommand(
     }
   }
 
-  throw new Error(`未检测到 kiro-cli；请在连接器设置中填写可执行文件路径。已检查: ${candidates.join(", ")}`);
+  throw new Error(
+    [
+      "未检测到 kiro-cli。请按以下步骤排查，或在上方「命令」中填写可执行文件路径：",
+      "1. 终端执行 command -v kiro-cli，有输出则把该路径填入「命令」",
+      "2. 若无输出，执行 ls -l " + candidates.slice(0, 3).join(" ") + " 查看是否已安装",
+      "3. macOS 通过 Kiro CLI 应用安装时，路径通常是 /Applications/Kiro CLI.app/Contents/MacOS/kiro-cli",
+      "4. 仍找不到说明未安装，需先安装 Kiro CLI",
+      "已检查过的路径：" + candidates.join("、"),
+    ].join("\n"),
+  );
 }

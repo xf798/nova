@@ -29,6 +29,22 @@ const defaultCliForm: CliFormData = {
 };
 const defaultBotForm: BotFormData = { name: "", platform: "wecom", botId: "", secret: "", autoConnect: true, policy: { ...DEFAULT_WECOM_POLICY } };
 
+type CliCommandResolver = {
+  resolveCommand(force?: boolean): Promise<KiroCliCommandResolution>;
+  resetProcess?(): Promise<void>;
+};
+
+/**
+ * 按能力判断而非 instanceof。
+ *
+ * Vite HMR 重载 kiro-cli 模块后类标识会变，instanceof 失配会静默跳过
+ * 强制重解析，让改错的命令仍复用旧解析结果显示「检测通过」。
+ */
+function asCommandResolver(connector: unknown): CliCommandResolver | null {
+  const candidate = connector as CliCommandResolver | null;
+  return candidate && typeof candidate.resolveCommand === "function" ? candidate : null;
+}
+
 function ConnectorsPage() {
   const [, setTick] = useState(0);
   const connectors = connectorRegistry.getAll().filter(c => !c.config.internal);
@@ -66,8 +82,9 @@ function ConnectorsPage() {
 
   useEffect(() => {
     for (const connector of connectors) {
-      if (!(connector instanceof KiroCliConnector)) continue;
-      connector.resolveCommand().then(resolution => {
+      const resolver = asCommandResolver(connector);
+      if (!resolver || connector.config.type !== "cli") continue;
+      resolver.resolveCommand().then(resolution => {
         setCliCommandStatus(previous => ({ ...previous, [connector.config.id]: { resolution } }));
       }).catch(error => {
         setCliCommandStatus(previous => ({
@@ -109,18 +126,38 @@ function ConnectorsPage() {
     const connector = connectorRegistry.get(id);
     if (!connector) return;
     setHealthStatus(prev => ({ ...prev, [id]: null }));
-    if (connector instanceof KiroCliConnector) {
-      try {
-        const resolution = await connector.resolveCommand(true);
-        setCliCommandStatus(previous => ({ ...previous, [id]: { resolution } }));
-      } catch (error: any) {
-        setCliCommandStatus(previous => ({ ...previous, [id]: { error: error?.message || String(error) } }));
-        setHealthStatus(prev => ({ ...prev, [id]: false }));
-        return;
+
+    // 检测必须验证用户眼前填的值。
+    //
+    // 命令输入框在展开的编辑区，而「检测」在卡片头部：只读已保存配置时，
+    // 用户改了地址还没保存就点检测，验证的是旧配置，错误地址也会显示通过。
+    const resolver = asCommandResolver(connector);
+    const editing = resolver && editingId === id && editCliForm.id === id;
+    const savedCommand = connector.config.command || "";
+    const pendingCommand = editing ? editCliForm.command.trim() : savedCommand;
+    const usePending = pendingCommand !== savedCommand;
+    if (usePending) connector.config.command = pendingCommand;
+
+    try {
+      if (resolver) {
+        try {
+          const resolution = await resolver.resolveCommand(true);
+          setCliCommandStatus(previous => ({ ...previous, [id]: { resolution } }));
+        } catch (error: any) {
+          setCliCommandStatus(previous => ({ ...previous, [id]: { error: error?.message || String(error) } }));
+          setHealthStatus(prev => ({ ...prev, [id]: false }));
+          return;
+        }
+      }
+      const ok = await connector.healthCheck();
+      setHealthStatus(prev => ({ ...prev, [id]: ok }));
+    } finally {
+      // 检测不代表保存：验证完还原配置，并清掉按待验证命令建立的解析缓存
+      if (usePending) {
+        connector.config.command = savedCommand;
+        await resolver?.resetProcess?.().catch(() => {});
       }
     }
-    const ok = await connector.healthCheck();
-    setHealthStatus(prev => ({ ...prev, [id]: ok }));
   };
 
   const handleAddApi = () => {
@@ -228,11 +265,12 @@ function ConnectorsPage() {
       cfg.defaultArgs = newArgs;
       cfg.cwd = newCwd;
       cfg.description = editCliForm.description || undefined;
-      if (needReset && connector instanceof KiroCliConnector) {
+      const resolver = asCommandResolver(connector);
+      if (needReset && resolver) {
         try {
-          await connector.resetProcess();
+          await resolver.resetProcess?.();
           await connectorInstances.disposeByConnectorId(cfg.id);
-          const resolution = await connector.resolveCommand(true);
+          const resolution = await resolver.resolveCommand(true);
           setCliCommandStatus(previous => ({ ...previous, [cfg.id]: { resolution } }));
         } catch (error: any) {
           setCliCommandStatus(previous => ({

@@ -119,6 +119,11 @@ DMG="$(ls "$BUNDLE_DIR"/dmg/*.dmg 2>/dev/null | head -1 || true)"
 [ -f "$APP_SIG" ]   || die "缺少签名文件: $APP_SIG"
 [ -n "$DMG" ]       || die "缺少 dmg 产物"
 
+# Nova 没有 Apple Developer ID 签名与公证，下载后双击会被 Gatekeeper 判为
+# 「已损坏」。往 DMG 里放一个安装脚本，用户右键打开即可完成安装与解除隔离。
+info "向 DMG 注入安装脚本"
+"$ROOT/scripts/inject-dmg-installer.sh" "$DMG"
+
 info "产物:"
 echo "    $(basename "$APP_TARGZ")  $(du -h "$APP_TARGZ" | cut -f1)"
 echo "    $(basename "$APP_SIG")"

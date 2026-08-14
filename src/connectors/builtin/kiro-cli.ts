@@ -333,6 +333,8 @@ export class KiroCliConnector implements Connector {
   private mcpServers: McpServerConfig[] = [];
   /** 已解析到的 kiro-cli 真实路径；配置变更时由 resetProcess 清除 */
   private commandResolution: KiroCliCommandResolution | null = null;
+  /** 上次解析所依据的 config.command，用于判断缓存是否已失效 */
+  private resolvedFor: string | null = null;
 
   /** 标记当前是否正在执行闲置 kill（用于区分 close 事件是正常退出还是崩溃） */
   private isIdleKilling: boolean = false;
@@ -514,7 +516,12 @@ export class KiroCliConnector implements Connector {
 
   /** 获取当前配置实际解析到的命令路径，供设置页展示。 */
   async resolveCommand(force = false): Promise<KiroCliCommandResolution> {
-    if (this.commandResolution && !force) return this.commandResolution;
+    // 缓存必须与 config.command 绑定：用户改了命令后若继续复用旧解析结果，
+    // 健康检查会拿早先探测到的可用路径去执行，错误配置也会显示「通过」。
+    const configured = this.config.command?.trim() || "";
+    if (this.commandResolution && !force && this.resolvedFor === configured) {
+      return this.commandResolution;
+    }
 
     const resolution = await resolveKiroCliCommand(this.config.command, {
       homeDir,
@@ -533,6 +540,7 @@ export class KiroCliConnector implements Connector {
       },
     });
     this.commandResolution = resolution;
+    this.resolvedFor = configured;
     return resolution;
   }
 
@@ -1968,6 +1976,7 @@ export class KiroCliConnector implements Connector {
   async resetProcess(): Promise<void> {
     console.log(`[ACP] 🔄 resetProcess: 配置已变更，重置进程 | connector: ${this.config.id}`);
     this.commandResolution = null;
+    this.resolvedFor = null;
     await this.killAcpProcess();
   }
 
