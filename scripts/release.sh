@@ -119,11 +119,6 @@ DMG="$(ls "$BUNDLE_DIR"/dmg/*.dmg 2>/dev/null | head -1 || true)"
 [ -f "$APP_SIG" ]   || die "缺少签名文件: $APP_SIG"
 [ -n "$DMG" ]       || die "缺少 dmg 产物"
 
-# Nova 没有 Apple Developer ID 签名与公证，下载后双击会被 Gatekeeper 判为
-# 「已损坏」。往 DMG 里放一个安装脚本，用户右键打开即可完成安装与解除隔离。
-info "向 DMG 注入安装脚本"
-"$ROOT/scripts/inject-dmg-installer.sh" "$DMG"
-
 info "产物:"
 echo "    $(basename "$APP_TARGZ")  $(du -h "$APP_TARGZ" | cut -f1)"
 echo "    $(basename "$APP_SIG")"
@@ -184,11 +179,39 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # ── 6. 上传 ──
+# Release 页面的说明额外附首次打开指引。
+#
+# Nova 没有 Apple Developer ID 签名与公证，从浏览器下载的应用会被 Gatekeeper
+# 拦下，提示「已损坏」——文件本身是完好的，只是缺可信签名。放行入口在系统设置里，
+# 纯图形操作，因此写在 Release 页面而不是 latest.json：后者是应用内更新弹窗的
+# 正文，走自动更新的用户已经装过一次，不需要再看安装说明。
+RELEASE_NOTES="$(cat <<EOF
+$NOTES
+
+---
+
+### 首次打开提示「已损坏」怎么办
+
+应用文件是完好的，这是 macOS 对未经 Apple 公证的应用的拦截提示。放行一次即可，之后正常使用：
+
+1. 把 Nova 拖到「应用程序」，双击一次（会被拦下）
+2. 打开「系统设置」→「隐私与安全性」
+3. 下滑找到关于 Nova 被阻止的提示，点「仍要打开」
+4. 弹窗中再次确认
+
+如果设置里没有出现该提示，在终端执行一次也可以：
+
+\`\`\`bash
+xattr -dr com.apple.quarantine /Applications/Nova.app
+\`\`\`
+EOF
+)"
+
 info "创建 Release $TAG 并上传资产到 $RELEASE_REPO"
 gh release create "$TAG" \
   --repo "$RELEASE_REPO" \
   --title "Nova $TAG" \
-  --notes "$NOTES" \
+  --notes "$RELEASE_NOTES" \
   "$APP_TARGZ" "$APP_SIG" "$DMG" "$LATEST_JSON"
 
 info "✅ 发布完成"
