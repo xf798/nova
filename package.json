@@ -1,6 +1,6 @@
 {
   "name": "nova",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Nova - AI Chat Client",
   "private": true,
   "type": "module",

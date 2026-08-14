@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicholasxjy/tauri-config-schema/main/schema.json",
   "productName": "Nova",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "identifier": "com.nova.app",
   "build": {
     "frontendDist": "../dist",
