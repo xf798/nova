@@ -36,6 +36,47 @@ export function resolveBindingTarget(
 }
 
 
+export interface BindableSession {
+  id: string;
+  title: string;
+  updatedAt: string;
+}
+
+export type BindTargetMatch =
+  | { kind: "matched"; session: BindableSession }
+  | { kind: "ambiguous"; candidates: BindableSession[] }
+  | { kind: "none" };
+
+export function isChannelSessionId(sessionId: string): boolean {
+  return sessionId.startsWith("wecom-");
+}
+
+/**
+ * 对话里下达绑定指令时只会说会话标题（"绑到客户画像-UI"），拿不到 session-1755xxx-a1b2 这种 ID，
+ * 所以按 ID → 同名 → 包含 三级放宽匹配。命中多个同名时取最近更新的那个：标题相同的会话
+ * 在对话里无从区分，追问也问不出来，取最新最接近意图；包含匹配命中多个则交回候选让上层追问。
+ */
+export function matchBindTarget(target: string, sessions: BindableSession[]): BindTargetMatch {
+  const keyword = target.trim().toLowerCase();
+  if (!keyword) return { kind: "none" };
+
+  const bindable = sessions.filter(session => !isChannelSessionId(session.id));
+  const newestFirst = (a: BindableSession, b: BindableSession) => b.updatedAt.localeCompare(a.updatedAt);
+
+  const byId = bindable.find(session => session.id === target.trim());
+  if (byId) return { kind: "matched", session: byId };
+
+  const exact = bindable.filter(session => session.title.trim().toLowerCase() === keyword);
+  if (exact.length) return { kind: "matched", session: [...exact].sort(newestFirst)[0] };
+
+  const partial = bindable.filter(session => session.title.toLowerCase().includes(keyword));
+  if (partial.length === 1) return { kind: "matched", session: partial[0] };
+  if (partial.length > 1) return { kind: "ambiguous", candidates: [...partial].sort(newestFirst).slice(0, 10) };
+
+  return { kind: "none" };
+}
+
+
 export class ChannelBindingStore {
   private mutationQueue: Promise<void> = Promise.resolve();
 

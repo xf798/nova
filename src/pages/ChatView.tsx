@@ -21,7 +21,6 @@ import { useSessionStore } from "../core/sessionStore";
 import { scheduler } from "../core/scheduler";
 import ChatInput from "./chat/ChatInput";
 import MessageItem from "./chat/MessageItem";
-import WecomSessionBinding from "./chat/WecomSessionBinding";
 import { isNearBottom, shouldSmoothFollow } from "./chat/scrollFollow";
 
 // 队列项：AI 输出中排队待发的指令
@@ -906,10 +905,6 @@ function ChatView() {
           </div>
         )}
       </div>
-
-      {activeSessionId?.startsWith("wecom-") && (
-        <WecomSessionBinding channelSessionId={activeSessionId} sessions={sessions} />
-      )}
 
       {/* 上下文指示器：Skill + 引用消息 统一一行 */}
       {(activeSkills.length > 0 || quotedMessage) && (

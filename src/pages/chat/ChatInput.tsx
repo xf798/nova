@@ -6,6 +6,8 @@ import { getWorkspaceDirs } from "../../plugins/builtin/workspace";
 import { bootstrapCommands, dispatchCommand, resolveCommand, runDistill } from "../../core/commands";
 import ConnectorSelector from "./ConnectorSelector";
 import ModelSelector from "./ModelSelector";
+import WecomSessionBinding from "./WecomSessionBinding";
+import { useSessionStore } from "../../core/sessionStore";
 import { SEND_GUARD_MS, showStopButton } from "./sendGuard";
 
 /** 弹 toast（复用 App 的 nova-notify 监听） */
@@ -41,6 +43,10 @@ function ChatInput({
   totalUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; resourcePoints: number };
 }) {
   const { activeConnector, hasFullDiskAccess, requestFullDiskAccess, setPreviewPanel } = useAppStore();
+  // 企微入口会话才显示「关联 Nova 会话」；放在工具栏与连接器/模型/工作目录同排，
+  // 都是会话级配置，不额外占用消息区上方的垂直空间。
+  const sessions = useSessionStore(s => s.sessions);
+  const isWecomSession = !!sessionId?.startsWith("wecom-");
   const [isComposing, setIsComposing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // 发送后的停止保护期，防止紧跟的第二次点击落在停止按钮上
@@ -261,6 +267,9 @@ function ChatInput({
                 )}
                 <span>{distilling ? "蒸馏中" : "蒸馏"}</span>
               </button>
+              {isWecomSession && sessionId && (
+                <WecomSessionBinding channelSessionId={sessionId} sessions={sessions} />
+              )}
               {totalUsage && (totalUsage.resourcePoints > 0 || totalUsage.totalTokens > 0) && (
                 <span
                   className="inline-flex items-center gap-1 px-2 py-[2px] rounded-full text-[10px] font-medium text-app-text-muted"
