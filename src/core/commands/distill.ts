@@ -10,6 +10,7 @@
 import { connectorInstances } from "../../connectors/instance-manager";
 import { useSessionStore } from "../sessionStore";
 import { distillSessions } from "../distill";
+import { enqueueReview } from "../distill";
 import type { SlashCommand, CommandContext } from "./registry";
 
 /** 解析 --recent Nd / --recent N，返回天数（未指定返回 null） */
@@ -80,8 +81,16 @@ export async function runDistill(ctx: CommandContext, argsRaw = ""): Promise<voi
       `蒸馏完成：${result.memories.length} 记忆 / ${result.skills.length} 技能 / ${result.playbooks.length} 工作流，请审阅`,
       "success",
     );
-    // 打开审阅面板
-    window.dispatchEvent(new CustomEvent("nova-open-preview", { detail: { type: "distill", data: result } }));
+    // 先入待审队列再打开面板。
+    //
+    // 蒸馏要跑一次侧查询，成本不低。原先只把结果塞进面板，误点关闭就永久丢了，
+    // 只能重新蒸馏一次。入队后关闭只是收起面板，随时能从设置里的待审列表找回；
+    // 面板内「应用」或「忽略」会按 __queueId 主动出队，不会留下僵尸条目。
+    const queued = await enqueueReview(result);
+    window.dispatchEvent(new CustomEvent("nova-distill-queue-changed"));
+    window.dispatchEvent(new CustomEvent("nova-open-preview", {
+      detail: { type: "distill", data: { ...result, __queueId: queued.id } },
+    }));
   } finally {
     connector.dispose().catch(() => {});
   }

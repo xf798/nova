@@ -18,6 +18,7 @@ import { longTermMemory } from "../memory/longterm";
 import { skillRegistry } from "../skills/skillRegistry";
 import { ensureSkillsLoaded } from "../skills/skillLoader";
 import { buildDistillPrompt, formatDialog, parseDistillResult } from "./prompt";
+import { assessSkillQuality } from "./quality";
 import { DEFAULT_DISTILL_CONFIG, emptyDistillResult } from "./types";
 import type { DistillConfig, DistillResult } from "./types";
 import { getDistillConfig } from "./config";
@@ -221,13 +222,33 @@ export async function distillSessions(
   progress("整理蒸馏结果");
   const parsed = parseDistillResult(raw, sessionIds);
 
+  // 6.1 可迁移性闸门。
+  //
+  // prompt 已要求 Skill 写清机制，但模型仍会退化成纯操作清单。这类资产
+  // 换个项目就没用，还会挤占召回预算，因此不放进候选，只留日志便于回看。
+  const rejected: string[] = [];
+  parsed.skills = parsed.skills.filter((s) => {
+    const verdict = assessSkillQuality(s);
+    if (!verdict.reusable) {
+      rejected.push(`${s.name}(${verdict.issues.map((i) => i.code).join(",")})`);
+      return false;
+    }
+    if (verdict.issues.length > 0) {
+      console.warn(`[Distill] skill "${s.name}" 可改进: ${verdict.issues.map((i) => i.message).join("; ")}`);
+    }
+    return true;
+  });
+  if (rejected.length > 0) {
+    console.warn(`[Distill] 已拦截 ${rejected.length} 个不可迁移的 skill: ${rejected.join(", ")}`);
+  }
+
   // 7. 推进水位线（蒸馏已发生，避免重复处理这批消息）
   for (const w of pendingWatermarks) {
     advanceWatermark(w.id, w.count);
   }
 
   console.log(
-    `[Distill] 蒸馏完成: 新消息=${newMessages.length}, memories=${parsed.memories.length}, skills=${parsed.skills.length}, playbooks=${parsed.playbooks.length}`,
+    `[Distill] 蒸馏完成: 新消息=${newMessages.length}, memories=${parsed.memories.length}, skills=${parsed.skills.length}(拦截${rejected.length}), playbooks=${parsed.playbooks.length}`,
   );
   return parsed;
 }

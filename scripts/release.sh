@@ -21,7 +21,15 @@ SIGNING_KEY="$HOME/.tauri/nova.key"
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 CONF="$ROOT/src-tauri/tauri.conf.json"
-BUNDLE_DIR="$ROOT/src-tauri/target/release/bundle"
+
+# 通用二进制（Apple Silicon + Intel 同包）。
+#
+# 原先按构建机架构出包（uname -m），本机是 arm64，因此只产出 aarch64 包，
+# Intel Mac 双击直接打不开——Rosetta 只能 x86_64→arm64，反方向不行，
+# 且 latest.json 只声明 darwin-aarch64，Intel 用户连更新检查都匹配不到。
+# 改为 universal 后产物目录多一层 target triple，需同步。
+BUILD_TARGET="universal-apple-darwin"
+BUNDLE_DIR="$ROOT/src-tauri/target/$BUILD_TARGET/release/bundle"
 
 DRY_RUN=0
 NEW_VERSION=""
@@ -102,13 +110,19 @@ info "构建（bundles=app,dmg，含 updater 产物）"
 export TAURI_SIGNING_PRIVATE_KEY="$(cat "$SIGNING_KEY")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
+# universal 构建要求两个 target 都已安装，缺一个 tauri 只会在编译中途报错
+for t in aarch64-apple-darwin x86_64-apple-darwin; do
+  rustup target list --installed 2>/dev/null | grep -qx "$t" \
+    || die "缺少 Rust target $t（跑 rustup target add $t）"
+done
+
 # 注意：targets 必须显式指定，配成 "all" 时 tauri CLI 会跳过打包
 #
 # CI=true 让 tauri 给 bundle_dmg.sh 传 --skip-jenkins，跳过用 Finder
 # 美化 DMG 窗口的那段 AppleScript。那一步依赖「发送 Apple 事件给 Finder」
 # 的自动化授权，而每次终端宿主程序更新（如 kiro-cli 自更新）授权就会失效，
 # 报 -1743 让整个打包失败。窗口摆放是纯观感，不值得为它卡住发版。
-CI=true node ./node_modules/.bin/tauri build --bundles app,dmg
+CI=true node ./node_modules/.bin/tauri build --target "$BUILD_TARGET" --bundles app,dmg
 
 # ── 4. 定位产物 ──
 APP_TARGZ="$BUNDLE_DIR/macos/Nova.app.tar.gz"
@@ -125,13 +139,10 @@ echo "    $(basename "$APP_SIG")"
 echo "    $(basename "$DMG")  $(du -h "$DMG" | cut -f1)"
 
 # ── 5. 生成 latest.json ──
-# platform key 规则: {darwin|windows|linux}-{x86_64|aarch64}
-ARCH="$(uname -m)"
-case "$ARCH" in
-  arm64|aarch64) PLATFORM="darwin-aarch64" ;;
-  x86_64)        PLATFORM="darwin-x86_64" ;;
-  *) die "未知架构: $ARCH" ;;
-esac
+# 通用包同时满足两种芯片，因此两个 platform key 都指向同一个产物。
+# updater 是按 {os}-{arch} 精确查表的，只声明一个 key 会让另一种芯片的
+# 客户端检查更新时找不到条目（表现为「已是最新」或直接报错）。
+PLATFORM_KEYS="darwin-aarch64 darwin-x86_64"
 
 # 更新说明。
 #
@@ -142,7 +153,7 @@ esac
 NOTES="${NOTES:-$(git log -20 --pretty=%s | grep -v -E '^chore: 版本升级' | head -1)}"
 LATEST_JSON="$BUNDLE_DIR/latest.json"
 
-info "生成 latest.json (platform=$PLATFORM)"
+info "生成 latest.json (platforms=$PLATFORM_KEYS)"
 # 下载地址走加速代理。
 #
 # GitHub 直连实测只有 21KB/s（自己的仓库也一样，是整体带宽问题），
@@ -153,18 +164,21 @@ GH_URL="https://github.com/$RELEASE_REPO/releases/download/$TAG/$(basename "$APP
 SIGNATURE="$(cat "$APP_SIG")" \
 DL_URL="https://gh-proxy.com/$GH_URL" \
 NOTES="$NOTES" \
+PLATFORM_KEYS="$PLATFORM_KEYS" \
 node -e "
   const fs=require('fs');
+  const platforms={};
+  for (const key of process.env.PLATFORM_KEYS.trim().split(/\s+/)) {
+    platforms[key]={
+      signature: process.env.SIGNATURE.trim(),
+      url: process.env.DL_URL,
+    };
+  }
   const out={
     version: '$VERSION',
     notes: process.env.NOTES || '',
     pub_date: new Date().toISOString(),
-    platforms: {
-      '$PLATFORM': {
-        signature: process.env.SIGNATURE.trim(),
-        url: process.env.DL_URL,
-      },
-    },
+    platforms,
   };
   fs.writeFileSync('$LATEST_JSON', JSON.stringify(out,null,2)+'\n');
 "

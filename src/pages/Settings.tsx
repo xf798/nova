@@ -39,7 +39,7 @@ interface SkillSettingItem {
 }
 
 function Settings() {
-  const { theme, setTheme, navigateTo } = useAppStore();
+  const { theme, setTheme, resolvedTheme, navigateTo } = useAppStore();
   const [memoryConfig, setMemoryConfig] = useState<MemoryConfig>(memoryManager.getConfig());
   const [ltStats, setLtStats] = useState<{ total: number; byCategory: Record<string, number> }>({ total: 0, byCategory: {} });
   const [skillStats, setSkillStats] = useState<{ total: number; loaded: number; withPaths: number }>({ total: 0, loaded: 0, withPaths: 0 });
@@ -213,9 +213,15 @@ function Settings() {
       <div className="space-y-8">
         <Section title="外观">
           <div className="flex gap-2">
-            <PillBtn active={theme === "dark"} onClick={() => setTheme("dark")} label="深色" />
+            <PillBtn active={theme === "system"} onClick={() => setTheme("system")} label="跟随系统" />
             <PillBtn active={theme === "light"} onClick={() => setTheme("light")} label="浅色" />
+            <PillBtn active={theme === "dark"} onClick={() => setTheme("dark")} label="深色" />
           </div>
+          {theme === "system" && (
+            <p className="text-[11px] text-app-text-muted mt-2">
+              当前跟随系统为{resolvedTheme === "dark" ? "深色" : "浅色"}，切换系统外观时会自动跟随
+            </p>
+          )}
         </Section>
 
         {/* 记忆 — 核心能力 */}

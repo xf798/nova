@@ -120,7 +120,15 @@ function PreviewPanel() {
 
   // 蒸馏审阅面板
   if (previewPanel.type === "distill") {
-    return <DistillReview result={previewPanel.data} onClose={() => setPreviewPanel(null)} />;
+    // key 必须随条目变化。
+    //
+    // DistillReview 用一批 useState(() => 从 result 派生) 做勾选态和可编辑副本，
+    // 惰性初始值只在挂载时求值一次。面板不关闭直接点另一条待审时，组件实例
+    // 被复用，这些 state 全留在上一条的数据上，界面看起来「没更新」。
+    // 加 key 让 React 销毁重建，比给每个 state 补一遍同步逻辑更不容易漏。
+    const d = previewPanel.data;
+    const reviewKey = d?.__queueId || `${d?.createdAt || ""}-${d?.sourceSessions?.join(",") || ""}`;
+    return <DistillReview key={reviewKey} result={d} onClose={() => setPreviewPanel(null)} />;
   }
 
   // 记忆列表侧边栏

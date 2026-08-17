@@ -13,13 +13,45 @@ import { useMcpBridge } from "./hooks/useMcpBridge";
 import { useWecomBridge } from "./hooks/useWecomBridge";
 import { useNovaInit } from "./hooks/useNovaInit";
 
+// ─── 主题 ───
+
+/** 用户的主题意图。system 表示跟随系统外观，实际明暗由 OS 决定 */
+export type ThemePreference = "dark" | "light" | "system";
+
+const THEME_KEY = "nova-theme";
+
+/** 读取持久化的主题偏好。缺省跟随系统，比硬编码一种外观更符合预期 */
+function loadThemePreference(): ThemePreference {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === "dark" || saved === "light" || saved === "system") return saved;
+  } catch {
+    // localStorage 不可用（隐私模式等）时走默认值，不影响启动
+  }
+  return "system";
+}
+
+function systemPrefersDark(): boolean {
+  return typeof window !== "undefined"
+    && !!window.matchMedia
+    && window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+/** 把用户意图解析为实际要应用的外观 */
+function resolveTheme(pref: ThemePreference): "dark" | "light" {
+  if (pref === "system") return systemPrefersDark() ? "dark" : "light";
+  return pref;
+}
+
 // ─── 全局 Context（非 session 状态） ───
 
 interface AppContextType {
   activeConnector: Connector;
   setActiveConnectorId: (id: string) => void;
-  theme: "dark" | "light";
-  setTheme: (t: "dark" | "light") => void;
+  theme: ThemePreference;
+  setTheme: (t: ThemePreference) => void;
+  /** theme 为 system 时解析出的实际外观，供需要区分明暗的逻辑使用 */
+  resolvedTheme: "dark" | "light";
   navigateTo: (page: string) => void;
   previewPanel: { type: 'image' | 'memories' | 'file' | 'distill'; data: any } | null;
   setPreviewPanel: (panel: { type: 'image' | 'memories' | 'file' | 'distill'; data: any } | null) => void;
@@ -35,7 +67,10 @@ export const useAppStore = () => useContext(AppContext)!;
 function App() {
   const [currentPage, setCurrentPage] = useState<string>("chat");
   const [activeConnectorId, setActiveConnectorId] = useState<string>("kiro-cli");
-  const [theme, setThemeState] = useState<"dark" | "light">("light");
+  // 惰性初始值读 localStorage：原先硬编码 "light" 且只写不读，
+  // 用户选的深色重启就丢了。
+  const [theme, setThemeState] = useState<ThemePreference>(loadThemePreference);
+  const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">(() => resolveTheme(loadThemePreference()));
   const [hasFullDiskAccess, setHasFullDiskAccess] = useState(true);
   const [notification, setNotification] = useState<{ msg: string; type: string } | null>(null);
   const [previewPanel, setPreviewPanel] = useState<{ type: 'image' | 'memories' | 'file' | 'distill'; data: any } | null>(null);
@@ -87,15 +122,31 @@ function App() {
   // MCP Server 桥接
   useMcpBridge();
 
-  // 主题
+  // 主题：持久化用户意图，DOM 上应用解析后的实际外观
   useEffect(() => {
-    const root = document.documentElement;
-    root.classList.remove("dark", "light");
-    root.classList.add(theme);
-    localStorage.setItem("nova-theme", theme);
+    const apply = (actual: "dark" | "light") => {
+      const root = document.documentElement;
+      root.classList.remove("dark", "light");
+      root.classList.add(actual);
+      setResolvedTheme(actual);
+    };
+
+    apply(resolveTheme(theme));
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // 存不进去只影响下次启动的恢复，不影响本次生效
+    }
+
+    // 仅跟随系统时才监听：固定深色/浅色的用户不该被系统切换影响
+    if (theme !== "system" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => apply(e.matches ? "dark" : "light");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
   }, [theme]);
 
-  const setTheme = (t: "dark" | "light") => setThemeState(t);
+  const setTheme = (t: ThemePreference) => setThemeState(t);
 
   // 加载历史 + 插件 + 同步 skills + 自动连接企微
   useNovaInit({ activeConnectorId, setHasFullDiskAccess });
@@ -173,7 +224,7 @@ function App() {
   }
 
   return (
-    <AppContext.Provider value={{ activeConnector: activeConnector!, setActiveConnectorId, theme, setTheme, navigateTo: setCurrentPage, previewPanel, setPreviewPanel, addAttachment: (path: string) => { window.dispatchEvent(new CustomEvent("nova-add-attachment", { detail: path })); }, hasFullDiskAccess, requestFullDiskAccess: () => { invoke("open_full_disk_access_settings"); } }}>
+    <AppContext.Provider value={{ activeConnector: activeConnector!, setActiveConnectorId, theme, setTheme, resolvedTheme, navigateTo: setCurrentPage, previewPanel, setPreviewPanel, addAttachment: (path: string) => { window.dispatchEvent(new CustomEvent("nova-add-attachment", { detail: path })); }, hasFullDiskAccess, requestFullDiskAccess: () => { invoke("open_full_disk_access_settings"); } }}>
       <div className="flex h-screen bg-app-bg text-app-text">
         {!sidebarCollapsed && (
         <Sidebar
