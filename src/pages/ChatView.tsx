@@ -765,14 +765,24 @@ function ChatView() {
             <span className="text-[13px] text-app-text-muted">加载会话…</span>
           </div>
         ) : isEmpty ? (
-          <div className="h-full flex flex-col items-center justify-center px-6">
-            <h1 className="text-[28px] font-semibold mb-2 text-app-text">有什么我能帮你的吗？</h1>
-            <p className="text-sm text-app-text-muted mb-8">{activeConnector.config.name}</p>
+          <div className="h-full flex flex-col px-4">
+            {/* 标题吃掉剩余高度并在其中居中，推荐区因此被压到底部、紧贴输入框。
+                若整块一起居中，推荐与输入框的距离会随窗口高度浮动，短屏挤在一起、
+                长屏飘在半空；分成两段后间距恒定。 */}
+            <div className="flex-1 min-h-0 flex flex-col items-center justify-center">
+              <h1 className="text-[28px] font-semibold mb-2 text-app-text">有什么我能帮你的吗？</h1>
+              <p className="text-sm text-app-text-muted">{activeConnector.config.name}</p>
+            </div>
             {/* 建议来自本地任务/会话/workflow 记忆；宁缺勿滥，没素材就不显示 */}
-            {/* 宽度与消息区/输入区一致（760px），避免缩在中间显得孤立；
-                两列等宽，既不参差也不会因标题短而显得空旷 */}
+            {/* 单列 + 宽度随文字自适应：建议文案长短差异很大（任务标题可能十几字，
+                会话标题可能三四字），等宽两列会把短文案撑成大片空白色块，视觉重量
+                远超它的信息量。左对齐让每条的起点对齐，扫读时只需扫一列。
+                这里不加自身 padding：左右留白交给外层 px-4（与 ChatInput 的
+                「外层 px-4 + 内层 max-w-760」结构相同），左边缘才能和输入框严丝合缝。 */}
             {suggestions.length > 0 && (
-              <div className="w-full max-w-[760px] px-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="w-full max-w-[760px] mx-auto shrink-0 pb-4 flex flex-col items-start gap-2">
+                {/* 缩进对齐胶囊内的文字而非边框，标题与内容成一条竖线 */}
+                <span className="px-3 text-[11px] text-app-text-muted">为你推荐</span>
                 {suggestions.map((s, i) => (
                   <button
                     key={i}
@@ -784,7 +794,7 @@ function ChatView() {
                       }
                     }}
                     title={`${s.label}\n${s.kind === "task" ? "继续这个任务" : s.kind === "session" ? "回到该会话" : "按记录的流程执行"}`}
-                    className="group/sg flex items-center gap-2.5 w-full px-3.5 py-2.5 rounded-xl bg-app-surface hover:bg-app-surface-hover transition-colors text-left"
+                    className="group/sg inline-flex items-center gap-2 max-w-full px-3 py-2 rounded-xl border border-app-border hover:bg-app-surface-hover transition-colors text-left"
                   >
                     <span className="shrink-0 flex items-center text-app-text-muted group-hover/sg:text-app-text-secondary transition-colors">
                       {s.kind === "task" ? (

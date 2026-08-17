@@ -12,7 +12,7 @@ vi.mock("./task", async (importOriginal) => ({
 }));
 vi.mock("./memory/longterm", () => ({ longTermMemory: { getAll: () => mockGetAllMemories() } }));
 
-const { buildSuggestions, extractWorkflowName } = await import("./suggestions");
+const { buildSuggestions, extractWorkflowName, sortForDisplay } = await import("./suggestions");
 
 const session = (id: string, title: string, updatedAt: string): ChatSession => ({
   id, title, connectorId: "kiro-cli", connectorSessionId: null,
@@ -158,5 +158,25 @@ describe("buildSuggestions — 优先级与宁缺勿滥", () => {
     ]);
     const r = await buildSuggestions([], null);
     expect(r.map(x => x.kind)).toEqual(["workflow"]);
+  });
+});
+
+describe("sortForDisplay", () => {
+  const item = (label: string) => ({ kind: "task" as const, label, prompt: label });
+
+  it("文案由长到短向下排列", () => {
+    const sorted = sortForDisplay([item("短"), item("中等长度的标题"), item("这是一条相当长的建议文案内容")]);
+    expect(sorted.map(s => s.label)).toEqual(["这是一条相当长的建议文案内容", "中等长度的标题", "短"]);
+  });
+
+  it("等长时保持入选顺序，不打乱取材优先级", () => {
+    const sorted = sortForDisplay([item("任务甲"), item("会话乙"), item("流程丙")]);
+    expect(sorted.map(s => s.label)).toEqual(["任务甲", "会话乙", "流程丙"]);
+  });
+
+  it("不修改入参数组", () => {
+    const input = [item("短"), item("长一点的标题")];
+    sortForDisplay(input);
+    expect(input.map(s => s.label)).toEqual(["短", "长一点的标题"]);
   });
 });

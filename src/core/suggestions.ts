@@ -131,5 +131,18 @@ export async function buildSuggestions(
     console.warn("[Suggestions] 读取记忆失败:", e);
   }
 
-  return out.slice(0, MAX_SUGGESTIONS);
+  return sortForDisplay(out.slice(0, MAX_SUGGESTIONS));
+}
+
+/**
+ * 展示顺序：文案由长到短向下排列。
+ *
+ * 胶囊宽度随文字走，随机长短会让右边缘参差不齐；长的在上、短的在下形成单调收窄的
+ * 阶梯，右边缘有了方向感，扫读时视线也自然从上往下收。
+ *
+ * 只影响呈现，不动 buildSuggestions 的取材优先级（任务 → 会话 → 流程）：
+ * 优先级决定「谁入选」，长度决定「怎么摆」。等长时保持原有相对顺序（sort 稳定）。
+ */
+export function sortForDisplay(suggestions: Suggestion[]): Suggestion[] {
+  return [...suggestions].sort((a, b) => b.label.length - a.label.length);
 }
