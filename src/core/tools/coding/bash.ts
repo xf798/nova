@@ -23,7 +23,7 @@ export const bashDef: ToolDefinition = {
     type: "object",
     properties: {
       command: { type: "string", description: "The shell command to execute" },
-      cwd: { type: "string", description: "Working directory for the command (optional, defaults to home)" },
+      cwd: { type: "string", description: "Working directory for the command (optional, defaults to the current working directory)" },
       timeout: { type: "number", description: "Timeout in milliseconds (optional, default 30000, max 300000)" },
     },
     required: ["command"],
@@ -31,13 +31,15 @@ export const bashDef: ToolDefinition = {
 };
 
 export function registerBash() {
-  toolRegistry.register("bash", async (params) => {
+  toolRegistry.register("bash", async (params, ctx) => {
     const { command, cwd, timeout } = params || {};
     if (!command) return { ok: false, error: "Missing required parameter: command" };
     try {
       const output = await invoke<BashOutput>("tool_bash", {
         command,
-        cwd: cwd || undefined,
+        // 缺省用会话工作目录：命令在家目录跑既不符合预期，
+        // 也容易让 ls/find 之类撞上 TCC 保护目录触发弹框
+        cwd: cwd || ctx?.cwd || undefined,
         timeoutMs: timeout || undefined,
       });
 

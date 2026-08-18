@@ -18,7 +18,7 @@ class ToolOrchestrator {
   async execute(
     name: string,
     params: Record<string, any>,
-    _ctx?: ToolContext,
+    ctx?: ToolContext,
   ): Promise<ToolResult> {
     const def = toolRegistry.getDefinition(name);
 
@@ -32,7 +32,7 @@ class ToolOrchestrator {
     // if (blocked) return blocked;
 
     // 执行
-    const result = await toolRegistry.call(name, params);
+    const result = await toolRegistry.call(name, params, ctx);
 
     // 结果截断
     if (result.ok && result.data != null) {

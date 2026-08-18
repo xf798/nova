@@ -15,7 +15,7 @@ export const globDef: ToolDefinition = {
     type: "object",
     properties: {
       pattern: { type: "string", description: "Glob pattern to match file names (e.g. '*.ts', '*.{ts,tsx}', 'test_*')" },
-      path: { type: "string", description: "Root directory to search from (optional, defaults to home)" },
+      path: { type: "string", description: "Root directory to search from (optional, defaults to the current working directory)" },
       limit: { type: "number", description: "Maximum number of results (optional, default 200, max 1000)" },
     },
     required: ["pattern"],
@@ -23,11 +23,14 @@ export const globDef: ToolDefinition = {
 };
 
 export function registerGlob() {
-  toolRegistry.register("glob", async (params) => {
+  toolRegistry.register("glob", async (params, ctx) => {
     const { pattern, path, limit } = params || {};
     if (!pattern) return { ok: false, error: "Missing required parameter: pattern" };
+    // 缺省落到会话工作目录而非家目录：搜整个 home 会遍历 ~/Downloads、~/Pictures 等
+    // TCC 保护目录，每个都弹一次系统授权框
+    const root = path || ctx?.cwd || undefined;
     try {
-      const files = await invoke<string[]>("tool_glob", { pattern, path, limit });
+      const files = await invoke<string[]>("tool_glob", { pattern, path: root, limit });
       if (files.length === 0) {
         return { ok: true, data: `No files found matching pattern: ${pattern}` };
       }

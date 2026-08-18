@@ -53,6 +53,27 @@ const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
     ".DS_Store",
 ];
 
+/// macOS 上受 TCC 保护的家目录一级子目录。
+///
+/// 只要 read_dir 碰一下，系统就弹一次「"nova" 想访问你的"下载"文件夹」，
+/// 一轮全盘搜索能连弹五六个框，而且 dev 版是 adhoc 签名、重新编译后 CDHash 变化，
+/// 之前点过的「允许」会失效，于是每次重启都重弹。
+///
+/// 这些目录里几乎不会有要搜的工程代码，宽范围搜索时直接跳过。
+/// 只按「home 的直接子目录」判定，不按目录名匹配——否则工程里正常的
+/// Documents/ 或 Library/ 子目录会被误伤。
+const HOME_PROTECTED_SUBDIRS: &[&str] = &[
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Pictures",
+    "Music",
+    "Movies",
+    "Library",
+    "Public",
+    ".Trash",
+];
+
 /// 验证路径安全性（写操作）
 fn validate_write_path(path: &Path) -> Result<(), String> {
     // 解析绝对路径
@@ -95,6 +116,39 @@ fn should_exclude(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// 判断某个条目是否是 home 下受 TCC 保护的一级子目录。
+///
+/// `guard_home` 仅在「搜索根就是家目录」时给出 Some：调用方显式指定了
+/// 具体路径就说明他知道自己在搜哪儿，不该替他跳过。
+fn is_home_protected(path: &Path, guard_home: Option<&Path>) -> bool {
+    let Some(home) = guard_home else { return false };
+    if path.parent() != Some(home) {
+        return false;
+    }
+    match path.file_name() {
+        Some(name) => {
+            let name = name.to_string_lossy();
+            HOME_PROTECTED_SUBDIRS.iter().any(|d| *d == name.as_ref())
+        }
+        None => false,
+    }
+}
+
+/// 宽范围搜索时是否跳过隐藏目录。
+///
+/// `~/Library`、`~/.Trash` 之外还有 `~/.cache`、`~/.npm` 这类体量巨大又无搜索价值的目录，
+/// 而且 iCloud/相册的实体数据藏在隐藏路径下，一并跳过能同时省掉弹框和无谓遍历。
+fn is_hidden_dir(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().starts_with('.'))
+        .unwrap_or(false)
+}
+
+/// 宽范围搜索（未显式指定 path）时应跳过的目录
+fn should_skip_dir(path: &Path, guard_home: Option<&Path>) -> bool {
+    guard_home.is_some() && (is_hidden_dir(path) || is_home_protected(path, guard_home))
 }
 
 // ─── 输出结构 ───
@@ -351,17 +405,17 @@ pub async fn tool_glob(
     path: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<String>, String> {
-    let root = path.unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string()
-    });
+    // 未指定 path 时以家目录兜底，并开启 guard：跳过 TCC 保护目录与隐藏目录。
+    // 显式给了 path 就完全按调用方的意思搜，不做额外跳过。
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let explicit = path.is_some();
+    let root = path.unwrap_or_else(|| home.to_string_lossy().to_string());
 
     let root_path = Path::new(&root);
     if !root_path.exists() {
         return Err(format!("路径不存在: {}", root));
     }
+    let guard_home: Option<&Path> = if explicit { None } else { Some(home.as_path()) };
 
     let max_results = limit.unwrap_or(200).min(1000);
     let mut results = Vec::new();
@@ -376,6 +430,7 @@ pub async fn tool_glob(
         pattern: &glob::Pattern,
         results: &mut Vec<String>,
         max: usize,
+        guard_home: Option<&Path>,
     ) {
         if results.len() >= max {
             return;
@@ -391,7 +446,7 @@ pub async fn tool_glob(
             }
             let path = entry.path();
 
-            // 排除隐藏目录和默认排除目录
+            // 排除默认排除目录，宽范围搜索时再跳过隐藏目录与 TCC 保护目录
             if should_exclude(&path) {
                 continue;
             }
@@ -406,12 +461,15 @@ pub async fn tool_glob(
                     results.push(path.to_string_lossy().to_string());
                 }
             } else if path.is_dir() {
-                walk_dir(&path, root, pattern, results, max);
+                if should_skip_dir(&path, guard_home) {
+                    continue;
+                }
+                walk_dir(&path, root, pattern, results, max, guard_home);
             }
         }
     }
 
-    walk_dir(root_path, root_path, &glob_pattern, &mut results, max_results);
+    walk_dir(root_path, root_path, &glob_pattern, &mut results, max_results, guard_home);
 
     results.sort();
     Ok(results)
@@ -425,17 +483,15 @@ pub async fn tool_grep(
     include: Option<String>,
     limit: Option<usize>,
 ) -> Result<String, String> {
-    let root = path.unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string()
-    });
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let explicit = path.is_some();
+    let root = path.unwrap_or_else(|| home.to_string_lossy().to_string());
 
     let root_path = Path::new(&root);
     if !root_path.exists() {
         return Err(format!("路径不存在: {}", root));
     }
+    let guard_home: Option<&Path> = if explicit { None } else { Some(home.as_path()) };
 
     let max_matches = limit.unwrap_or(100).min(500);
 
@@ -458,6 +514,7 @@ pub async fn tool_grep(
         include_pattern: &Option<glob::Pattern>,
         matches: &mut Vec<String>,
         max: usize,
+        guard_home: Option<&Path>,
     ) {
         if matches.len() >= max {
             return;
@@ -514,7 +571,10 @@ pub async fn tool_grep(
                     }
                 }
             } else if path.is_dir() {
-                search_dir(&path, regex, include_pattern, matches, max);
+                if should_skip_dir(&path, guard_home) {
+                    continue;
+                }
+                search_dir(&path, regex, include_pattern, matches, max, guard_home);
             }
         }
     }
@@ -537,7 +597,7 @@ pub async fn tool_grep(
             }
         }
     } else {
-        search_dir(root_path, &regex, &include_pattern, &mut matches, max_matches);
+        search_dir(root_path, &regex, &include_pattern, &mut matches, max_matches, guard_home);
     }
 
     if matches.is_empty() {
@@ -546,5 +606,56 @@ pub async fn tool_grep(
         let total = matches.len();
         let result = matches.join("\n");
         Ok(format!("{}\n\n[{} matches]", result, total))
+    }
+}
+
+#[cfg(test)]
+mod skip_dir_tests {
+    use super::*;
+
+    #[test]
+    fn 宽范围搜索跳过家目录下的受保护目录() {
+        let home = Path::new("/Users/someone");
+        let guard = Some(home);
+        for name in ["Downloads", "Pictures", "Music", "Documents", "Desktop", "Library"] {
+            assert!(
+                should_skip_dir(&home.join(name), guard),
+                "{} 应被跳过，否则会弹系统授权框",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn 显式指定路径时不跳过任何目录() {
+        let home = Path::new("/Users/someone");
+        // guard 为 None 表示调用方给了明确的 path，尊重其意图
+        assert!(!should_skip_dir(&home.join("Downloads"), None));
+        assert!(!should_skip_dir(&home.join(".config"), None));
+    }
+
+    #[test]
+    fn 不误伤工程内的同名目录() {
+        let home = Path::new("/Users/someone");
+        let guard = Some(home);
+        // 只按「home 的直接子目录」判定，工程内叫 Documents/Library 的目录照常搜
+        assert!(!should_skip_dir(Path::new("/Users/someone/workspace/app/Documents"), guard));
+        assert!(!should_skip_dir(Path::new("/Users/someone/workspace/app/Library"), guard));
+    }
+
+    #[test]
+    fn 宽范围搜索跳过隐藏目录() {
+        let home = Path::new("/Users/someone");
+        let guard = Some(home);
+        assert!(should_skip_dir(&home.join(".cache"), guard));
+        assert!(should_skip_dir(Path::new("/Users/someone/workspace/.venv-custom"), guard));
+        assert!(!should_skip_dir(&home.join("workspace"), guard));
+    }
+
+    #[test]
+    fn 默认排除目录与位置无关() {
+        assert!(should_exclude(Path::new("/any/where/node_modules/pkg/index.js")));
+        assert!(should_exclude(Path::new("/any/where/.git/config")));
+        assert!(!should_exclude(Path::new("/any/where/src/main.rs")));
     }
 }

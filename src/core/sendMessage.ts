@@ -310,8 +310,11 @@ export async function sendMessage(
     });
 
     // 执行每个 tool_call（通过 orchestrator）
+    // 带上工作目录：搜索类 tool 缺省会退回家目录，而遍历 ~/Downloads、~/Pictures 这类
+    // 目录会触发 macOS 逐个弹授权框。把会话工作目录传下去，默认搜索范围收敛到工程内。
+    const toolCtx = { cwd: cwd || workspace || "" };
     for (const tc of result.toolCalls) {
-      const toolResult = await toolOrchestrator.execute(tc.name, tc.arguments);
+      const toolResult = await toolOrchestrator.execute(tc.name, tc.arguments, toolCtx);
       allToolResults.push({ tool: tc.name, result: toolResult });
 
       accumulatedToolMessages.push({

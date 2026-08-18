@@ -3,7 +3,7 @@
 // 统一的 tool 注册中心。Nova 内置能力和插件都通过此机制暴露可调用的 tools。
 // LLM 通过 function calling / tool_use 调用这些 tools。
 
-import type { ToolDefinition, ToolScope } from "./types";
+import type { ToolContext, ToolDefinition, ToolScope } from "./types";
 
 // ─── 类型定义 ───
 
@@ -44,7 +44,13 @@ export interface ToolResult {
   error?: string;
 }
 
-export type ToolHandler = (params?: any) => Promise<ToolResult>;
+/**
+ * Tool 执行函数。
+ *
+ * 第二参数 ctx 携带会话级上下文（当前工作目录等）。声明为可选，
+ * 不需要上下文的 handler 照旧只写 params 即可。
+ */
+export type ToolHandler = (params?: any, ctx?: ToolContext) => Promise<ToolResult>;
 
 interface RegisteredTool {
   handler: ToolHandler;
@@ -87,13 +93,13 @@ class ToolRegistry {
   /**
    * 调用 tool
    */
-  async call(name: string, params?: any): Promise<ToolResult> {
+  async call(name: string, params?: any, ctx?: ToolContext): Promise<ToolResult> {
     const reg = this.tools.get(name);
     if (!reg) {
       return { ok: false, error: `Tool "${name}" not found` };
     }
     try {
-      return await reg.handler(params);
+      return await reg.handler(params, ctx);
     } catch (err: any) {
       return { ok: false, error: err.message || "Tool execution failed" };
     }

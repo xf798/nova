@@ -15,7 +15,7 @@ export const grepDef: ToolDefinition = {
     type: "object",
     properties: {
       pattern: { type: "string", description: "Regex pattern to search for" },
-      path: { type: "string", description: "Directory or file to search in (optional, defaults to home)" },
+      path: { type: "string", description: "Directory or file to search in (optional, defaults to the current working directory)" },
       include: { type: "string", description: "Glob pattern to filter file names (e.g. '*.ts', '*.{js,jsx}')" },
       limit: { type: "number", description: "Maximum number of matching lines (optional, default 100, max 500)" },
     },
@@ -24,11 +24,13 @@ export const grepDef: ToolDefinition = {
 };
 
 export function registerGrep() {
-  toolRegistry.register("grep", async (params) => {
+  toolRegistry.register("grep", async (params, ctx) => {
     const { pattern, path, include, limit } = params || {};
     if (!pattern) return { ok: false, error: "Missing required parameter: pattern" };
+    // 同 glob：缺省搜工作目录，避免遍历家目录下的 TCC 保护目录触发授权弹框
+    const root = path || ctx?.cwd || undefined;
     try {
-      const result = await invoke<string>("tool_grep", { pattern, path, include, limit });
+      const result = await invoke<string>("tool_grep", { pattern, path: root, include, limit });
       return { ok: true, data: result };
     } catch (err: any) {
       return { ok: false, error: String(err) };
