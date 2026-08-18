@@ -16,6 +16,32 @@ const ACP_LOG_RELATIVE_PATH = ".nova/logs/acp-session.log";
 // 每个 KiroCliConnector 实例拥有独立的 ACP 进程和 session，
 // 不再使用模块级变量做进程交接。HMR 时直接 kill 重建。
 
+// ─── 中立工作目录 ───
+//
+// kiro-cli 启动后会扫描 cwd。以前这里回退到家目录，于是它把 ~/Desktop、
+// ~/Documents、~/Downloads、~/Pictures/Photos Library、~/Music/Music Library、
+// ~/Library/Calendars、~/Library/Application Support/AddressBook 逐个碰了一遍，
+// macOS 对每个受保护路径弹一次授权框——发一句「hi」就能弹一屏。
+//
+// 实测在空目录里启动同一个 kiro-cli，TCC 请求为 0，所以回退值改成 ~/.nova 下的
+// 空目录：隐藏目录不受 TCC 管辖，且始终存在、可写。
+const NEUTRAL_CWD_RELATIVE = ".nova/agent-cwd";
+
+let neutralCwdCache: string | null = null;
+
+async function neutralCwd(): Promise<string> {
+  if (neutralCwdCache) return neutralCwdCache;
+  const dir = `${(await homeDir()).replace(/\/$/, "")}/${NEUTRAL_CWD_RELATIVE}`;
+  try {
+    await Command.create("sh", ["-c", 'mkdir -p "$1"', "--", dir]).execute();
+  } catch {
+    // 建不出来也不致命：kiro-cli 会在不存在的 cwd 上报错，交由调用方的错误分支处理，
+    // 总比静默退回家目录再弹一屏授权框好
+  }
+  neutralCwdCache = dir;
+  return dir;
+}
+
 async function fileLog(message: string): Promise<void> {
   const timestamp = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   const line = `[${timestamp}] ${message}`;
@@ -611,7 +637,7 @@ export class KiroCliConnector implements Connector {
     // 清理旧进程
     await this.killAcpProcess();
 
-    const processCwd = this.config.cwd || await homeDir();
+    const processCwd = this.config.cwd || await neutralCwd();
     const command = await this.createKiroCommand(
       this.config.defaultArgs || ["acp", "--agent-engine", "v2", "--trust-all-tools"],
       {
@@ -978,7 +1004,7 @@ export class KiroCliConnector implements Connector {
     const command: string = params.command;
     const args: string[] = params.args || [];
     const env: { name: string; value: string }[] = params.env || [];
-    const cwd: string = params.cwd || this.config.cwd || await homeDir();
+    const cwd: string = params.cwd || this.config.cwd || await neutralCwd();
     const outputByteLimit: number = params.outputByteLimit || 1024 * 1024; // 默认 1MB
 
     if (!command) {
@@ -1178,7 +1204,7 @@ export class KiroCliConnector implements Connector {
 
     if (this.sessionId) return this.sessionId;
 
-    const workingDir = cwd || this.config.cwd || await homeDir();
+    const workingDir = cwd || this.config.cwd || await neutralCwd();
 
     // ── 策略 1: session/resume ──
     // 进程存活 + agent 支持 resume 时尝试直接恢复（无需重放消息）
@@ -1345,7 +1371,7 @@ export class KiroCliConnector implements Connector {
           await this.ensureAcpProcess();
           // 直接 session/new，不走 ensureSession（避免再次触发 session/load）
           const retryResp = await this.sendRequest("session/new", {
-            cwd: options.cwd || this.config.cwd || await homeDir(),
+            cwd: options.cwd || this.config.cwd || await neutralCwd(),
             mcpServers: mcpServersForAcp(this.mcpServers),
           });
           if (retryResp.result?.sessionId) {
@@ -2035,7 +2061,7 @@ export class KiroCliConnector implements Connector {
     try {
       const command = await this.createKiroCommand(
         ["chat", "--list-models", "--format", "json"],
-        { cwd: this.config.cwd || await homeDir(), encoding: "utf-8" },
+        { cwd: this.config.cwd || await neutralCwd(), encoding: "utf-8" },
       );
       const output = await command.execute();
       const data = JSON.parse(output.stdout);
@@ -2052,7 +2078,7 @@ export class KiroCliConnector implements Connector {
     try {
       const command = await this.createKiroCommand(
         ["chat", "--list-sessions", "--format", "json"],
-        { cwd: this.config.cwd || await homeDir(), encoding: "utf-8" },
+        { cwd: this.config.cwd || await neutralCwd(), encoding: "utf-8" },
       );
       const output = await command.execute();
       const data = JSON.parse(output.stdout);
