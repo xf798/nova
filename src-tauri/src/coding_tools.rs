@@ -414,6 +414,55 @@ pub async fn tool_bash(
     }
 }
 
+/// glob 递归遍历。
+///
+/// 提到模块级是为了能对「不进入相册/音乐/桌面」这条约束做端到端验证——
+/// 光测判定函数不够，得证明遍历真的没走进去。
+fn walk_glob(
+    dir: &Path,
+    root: &Path,
+    pattern: &glob::Pattern,
+    results: &mut Vec<String>,
+    max: usize,
+    guard_home: Option<&Path>,
+) {
+    if results.len() >= max {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        if results.len() >= max {
+            return;
+        }
+        let path = entry.path();
+
+        // 排除默认排除目录，宽范围搜索时再跳过隐藏目录与 TCC 保护目录
+        if should_exclude(&path) {
+            continue;
+        }
+
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let relative_str = relative.to_string_lossy();
+
+        if path.is_file() {
+            // 匹配文件名或相对路径
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            if pattern.matches(&file_name) || pattern.matches(&relative_str) {
+                results.push(path.to_string_lossy().to_string());
+            }
+        } else if path.is_dir() {
+            if should_skip_dir(&path, guard_home) {
+                continue;
+            }
+            walk_glob(&path, root, pattern, results, max, guard_home);
+        }
+    }
+}
+
 /// 文件名模式搜索（glob）
 #[tauri::command]
 pub async fn tool_glob(
@@ -440,52 +489,7 @@ pub async fn tool_glob(
     let glob_pattern = glob::Pattern::new(&pattern)
         .map_err(|e| format!("无效的 glob 模式: {}", e))?;
 
-    fn walk_dir(
-        dir: &Path,
-        root: &Path,
-        pattern: &glob::Pattern,
-        results: &mut Vec<String>,
-        max: usize,
-        guard_home: Option<&Path>,
-    ) {
-        if results.len() >= max {
-            return;
-        }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            if results.len() >= max {
-                return;
-            }
-            let path = entry.path();
-
-            // 排除默认排除目录，宽范围搜索时再跳过隐藏目录与 TCC 保护目录
-            if should_exclude(&path) {
-                continue;
-            }
-
-            let relative = path.strip_prefix(root).unwrap_or(&path);
-            let relative_str = relative.to_string_lossy();
-
-            if path.is_file() {
-                // 匹配文件名或相对路径
-                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-                if pattern.matches(&file_name) || pattern.matches(&relative_str) {
-                    results.push(path.to_string_lossy().to_string());
-                }
-            } else if path.is_dir() {
-                if should_skip_dir(&path, guard_home) {
-                    continue;
-                }
-                walk_dir(&path, root, pattern, results, max, guard_home);
-            }
-        }
-    }
-
-    walk_dir(root_path, root_path, &glob_pattern, &mut results, max_results, guard_home);
+    walk_glob(root_path, root_path, &glob_pattern, &mut results, max_results, guard_home);
 
     results.sort();
     Ok(results)
@@ -714,5 +718,79 @@ mod skip_dir_tests {
         assert!(should_exclude(Path::new("/any/where/node_modules/pkg/index.js")));
         assert!(should_exclude(Path::new("/any/where/.git/config")));
         assert!(!should_exclude(Path::new("/any/where/src/main.rs")));
+    }
+}
+
+/// 端到端验证：在真实文件系统上跑一遍遍历，证明相册/音乐/桌面确实没被走进去。
+/// 只测判定函数不足以说明问题——递归里少一个判断就会漏。
+#[cfg(test)]
+mod walk_e2e_tests {
+    use super::*;
+
+    /// 造一个假家目录：受保护目录和普通工程目录里各放一个同名目标文件
+    fn make_fake_home(tag: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("nova-tcc-test-{}", tag));
+        let _ = std::fs::remove_dir_all(&home);
+        for dir in ["Pictures", "Music", "Desktop", "Downloads", "Documents", ".cache"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+            std::fs::write(home.join(dir).join("target.txt"), "x").unwrap();
+        }
+        std::fs::create_dir_all(home.join("workspace").join("proj")).unwrap();
+        std::fs::write(home.join("workspace").join("proj").join("target.txt"), "x").unwrap();
+        home
+    }
+
+    fn run(root: &Path, home: &Path) -> Vec<String> {
+        let guard = guard_for_root(root, home);
+        let pattern = glob::Pattern::new("target.txt").unwrap();
+        let mut out = Vec::new();
+        walk_glob(root, root, &pattern, &mut out, 100, guard.as_deref());
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn 搜家目录时不进入相册音乐桌面() {
+        let home = make_fake_home("wide");
+        let found = run(&home, &home);
+
+        for banned in ["Pictures", "Music", "Desktop", "Downloads", "Documents", ".cache"] {
+            assert!(
+                !found.iter().any(|p| p.contains(banned)),
+                "{} 被搜到了，说明遍历走进了受保护目录：{:?}",
+                banned,
+                found
+            );
+        }
+        // 工程目录照常命中，不是靠「什么都搜不到」蒙过测试
+        assert_eq!(found.len(), 1, "应只命中 workspace 里那一个：{:?}", found);
+        assert!(found[0].contains("workspace"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn 明确要求搜相册时才真的搜() {
+        let home = make_fake_home("explicit");
+        let pictures = home.join("Pictures");
+
+        let found = run(&pictures, &home);
+        assert_eq!(found.len(), 1, "明确指向相册就应该搜到：{:?}", found);
+        assert!(found[0].contains("Pictures"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn 在工程目录内搜索不受任何跳过影响() {
+        let home = make_fake_home("proj");
+        let proj = home.join("workspace").join("proj");
+        std::fs::create_dir_all(proj.join(".github")).unwrap();
+        std::fs::write(proj.join(".github").join("target.txt"), "x").unwrap();
+
+        let found = run(&proj, &home);
+        assert_eq!(found.len(), 2, "工程内的隐藏目录也该搜到：{:?}", found);
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
