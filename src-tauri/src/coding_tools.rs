@@ -120,8 +120,7 @@ fn should_exclude(path: &Path) -> bool {
 
 /// 判断某个条目是否是 home 下受 TCC 保护的一级子目录。
 ///
-/// `guard_home` 仅在「搜索根就是家目录」时给出 Some：调用方显式指定了
-/// 具体路径就说明他知道自己在搜哪儿，不该替他跳过。
+/// `guard_home` 由 `guard_for_root` 决定：只有搜索范围笼罩了整个家目录时才给出 Some。
 fn is_home_protected(path: &Path, guard_home: Option<&Path>) -> bool {
     let Some(home) = guard_home else { return false };
     if path.parent() != Some(home) {
@@ -133,6 +132,23 @@ fn is_home_protected(path: &Path, guard_home: Option<&Path>) -> bool {
             HOME_PROTECTED_SUBDIRS.iter().any(|d| *d == name.as_ref())
         }
         None => false,
+    }
+}
+
+/// 决定某次搜索是否需要开启防护。
+///
+/// 判据是「搜索根是否笼罩整个家目录」，而不是「调用方有没有显式传 path」——
+/// 模型习惯显式写 path: "/Users/xxx"，按后者判断等于留了个绕过口子，
+/// 照样会把相册、音乐、桌面全弹一遍。
+///
+/// - root 为 `~`、`/Users`、`/`：开启，跳过 home 下的受保护目录与隐藏目录
+/// - root 为 `~/workspace/proj`：关闭，工程内的 .github 等目录照常搜
+/// - root 为 `~/Pictures/xxx`：关闭，调用方明确指向相册就是真的要搜它
+fn guard_for_root(root: &Path, home: &Path) -> Option<PathBuf> {
+    if home.starts_with(root) {
+        Some(home.to_path_buf())
+    } else {
+        None
     }
 }
 
@@ -405,17 +421,17 @@ pub async fn tool_glob(
     path: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<String>, String> {
-    // 未指定 path 时以家目录兜底，并开启 guard：跳过 TCC 保护目录与隐藏目录。
-    // 显式给了 path 就完全按调用方的意思搜，不做额外跳过。
+    // 未指定 path 时以家目录兜底。防护是否开启取决于搜索范围有多大，
+    // 不取决于调用方有没有传 path——见 guard_for_root。
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let explicit = path.is_some();
     let root = path.unwrap_or_else(|| home.to_string_lossy().to_string());
 
     let root_path = Path::new(&root);
     if !root_path.exists() {
         return Err(format!("路径不存在: {}", root));
     }
-    let guard_home: Option<&Path> = if explicit { None } else { Some(home.as_path()) };
+    let guard = guard_for_root(root_path, &home);
+    let guard_home: Option<&Path> = guard.as_deref();
 
     let max_results = limit.unwrap_or(200).min(1000);
     let mut results = Vec::new();
@@ -484,14 +500,14 @@ pub async fn tool_grep(
     limit: Option<usize>,
 ) -> Result<String, String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let explicit = path.is_some();
     let root = path.unwrap_or_else(|| home.to_string_lossy().to_string());
 
     let root_path = Path::new(&root);
     if !root_path.exists() {
         return Err(format!("路径不存在: {}", root));
     }
-    let guard_home: Option<&Path> = if explicit { None } else { Some(home.as_path()) };
+    let guard = guard_for_root(root_path, &home);
+    let guard_home: Option<&Path> = guard.as_deref();
 
     let max_matches = limit.unwrap_or(100).min(500);
 
@@ -650,6 +666,47 @@ mod skip_dir_tests {
         assert!(should_skip_dir(&home.join(".cache"), guard));
         assert!(should_skip_dir(Path::new("/Users/someone/workspace/.venv-custom"), guard));
         assert!(!should_skip_dir(&home.join("workspace"), guard));
+    }
+
+    #[test]
+    fn 显式传家目录时照样开启防护() {
+        let home = Path::new("/Users/someone");
+        // 这是之前的漏洞：模型显式写 path: "/Users/someone"，防护却被关掉
+        let guard = guard_for_root(home, home);
+        assert!(guard.is_some(), "搜索根就是家目录，必须开启防护");
+        assert!(should_skip_dir(&home.join("Pictures"), guard.as_deref()));
+        assert!(should_skip_dir(&home.join("Music"), guard.as_deref()));
+        assert!(should_skip_dir(&home.join("Desktop"), guard.as_deref()));
+    }
+
+    #[test]
+    fn 搜索根在家目录之上时也开启防护() {
+        let home = Path::new("/Users/someone");
+        for root in ["/", "/Users"] {
+            let guard = guard_for_root(Path::new(root), home);
+            assert!(guard.is_some(), "root={} 笼罩家目录，应开启防护", root);
+            assert!(should_skip_dir(&home.join("Desktop"), guard.as_deref()));
+        }
+    }
+
+    #[test]
+    fn 明确指向受保护目录时允许访问() {
+        let home = Path::new("/Users/someone");
+        // 用户要求搜相册，就真的搜——防护关闭，其下子目录不受影响
+        let root = home.join("Pictures");
+        let guard = guard_for_root(&root, home);
+        assert!(guard.is_none());
+        assert!(!should_skip_dir(&root.join("2026"), guard.as_deref()));
+    }
+
+    #[test]
+    fn 工程目录内不跳过隐藏目录() {
+        let home = Path::new("/Users/someone");
+        let root = home.join("workspace").join("proj");
+        let guard = guard_for_root(&root, home);
+        assert!(guard.is_none(), "工程目录不需要防护");
+        // .github 这类目录在工程里是要能搜到的
+        assert!(!should_skip_dir(&root.join(".github"), guard.as_deref()));
     }
 
     #[test]
